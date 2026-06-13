@@ -1,0 +1,98 @@
+# =============================================================================
+# logistics-sim default config -- multi-profile
+# =============================================================================
+# Each entry in asset_profiles[] declares one asset TYPE the sim knows
+# how to populate. Add LTAMDS / Patriot / sonar arrays / whatever by
+# appending another profile -- no code change. A discovered asset
+# routes to the FIRST profile whose matches_platform_variants list
+# includes its platform_variant.
+#
+# Per-profile layout MUST mirror the matching frontend
+# SensorArrayView config (MRAD_CONFIG, future LTAMDS_CONFIG, etc.) --
+# the element_id format is shared and the frontend's liveTelemetry
+# lookup misses if the cardinality drifts.
+# =============================================================================
+
+# How often to publish per-asset snapshots, seconds.
+tick_interval_s: 30
+
+# Output topic on HQ broker. Generic asset-element-telemetry so future
+# profile additions don't fork the topic per asset type -- one consumer
+# (the projector) handles them all uniformly.
+output_topic: asset-element-telemetry
+
+# Which PowerState / HealthState enum values count as "asset is
+# degraded" for synthesis. Defaults err toward "show as degraded if
+# in doubt" -- the maintainer demo wants the broken-element visual
+# to fire on any non-nominal state. List name values from the proto
+# enums in openddil/telemetry/v1/telemetry.proto.
+degraded_power_states:
+  - POWER_STATE_OFF
+  - POWER_STATE_SHUTTING_DOWN
+  - POWER_STATE_MAINTENANCE
+degraded_health_states:
+  - HEALTH_STATE_DEGRADED
+  - HEALTH_STATE_FAULT
+  - HEALTH_STATE_FAILED
+
+asset_profiles:
+  # ---- MRAD --------------------------------------------------------------
+  # Single-face Multi-Mission Radar. Layout mirrors frontend MRAD_CONFIG.
+  - name: mrad
+    matches_platform_variants:
+      - MRAD_Sensor
+      - MRAD_Radar
+      - MRAD_Interceptor
+      - MRAD2_radar   # customer-overlay specific variant token
+    layers:
+      - name: RADAR UNIT
+        prefix: TR
+      - name: BACKPLANE
+        prefix: BOARD
+        cols: 2
+        rows: 3
+      - name: PROCESSOR BANK
+        prefix: MODULE
+        cols: 2
+        rows: 2
+      - name: GAN MMIC CHIP
+        prefix: CHIP
+        cols: 3
+        rows: 3
+    faces:
+      - name: PRIMARY APERTURE
+        cols: 8
+        rows: 12
+    synthesis:
+      health_nominal_min: 0.55
+      health_nominal_max: 0.85
+      degraded_fraction: 0.15
+      temp_min: 30
+      temp_max: 75
+      load_min: 5
+      load_max: 95
+      tick_drift_temp: 1.5
+      tick_drift_load: 5.0
+
+  # Future profiles land below as additional entries. Example template:
+  #
+  # - name: ltamds
+  #   matches_platform_variants:
+  #     - LTAMDS_Sensor
+  #     - LTAMDS_Radar
+  #   layers:
+  #     - name: RADAR UNIT
+  #       prefix: TR
+  #     ...
+  #   faces:
+  #     - name: PRIMARY NORTH
+  #       cols: 8
+  #       rows: 14
+  #     - name: SECTOR ALPHA
+  #       cols: 5
+  #       rows: 8
+  #     - name: SECTOR BETA
+  #       cols: 5
+  #       rows: 8
+  #   synthesis:
+  #     ...

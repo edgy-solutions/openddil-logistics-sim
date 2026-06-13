@@ -1,0 +1,32 @@
+[project]
+name = "openddil-logistics-sim"
+version = "0.1.0"
+description = "Per-element telemetry simulator for the maintainer-tier 3D drill-down views. Multi-profile (MRAD first; LTAMDS / Patriot / future to follow). Augments customer asset feeds with synthetic sub-component telemetry and honors upstream operational_state + tx/rx so the maintainer 3D render stays synchronized with what the customer sim reports."
+requires-python = ">=3.11"
+
+dependencies = [
+    "aiokafka>=0.10,<0.12",
+    "pyyaml>=6.0",
+    "protobuf>=4.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+logistics-sim = "logistics_sim.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["logistics_sim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+asyncio_mode = "auto"
