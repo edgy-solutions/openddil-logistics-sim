@@ -39,7 +39,10 @@ def mrad_layers() -> tuple[LayerSpec, ...]:
 
 @pytest.fixture
 def mrad_faces() -> tuple[FaceSpec, ...]:
-    return (FaceSpec(name="PRIMARY APERTURE", cols=8, rows=12),)
+    # 6×8 = 48 face elements (was 8×12 = 96). Shrunk to keep WebGL
+    # context alive on work-cluster integrated GPU. Must match
+    # config/default.yaml + frontend MRAD_CONFIG.faces.
+    return (FaceSpec(name="PRIMARY APERTURE", cols=6, rows=8),)
 
 
 @pytest.fixture
@@ -69,10 +72,10 @@ def _nominal_state(variant: str = "MRAD2_radar") -> AssetState:
 
 def test_cardinality_matches_layout(mrad_layers, mrad_faces):
     # Tree topology — depth-0 face × (per-layer cols×rows)^depth fanout.
-    # 96 + 96*4 + 96*4*4 + 96*4*4*4 = 8,160.
-    expected = 96 + 96 * 4 + 96 * 4 * 4 + 96 * 4 * 4 * 4
+    # 48 + 48*4 + 48*4*4 + 48*4*4*4 = 4,080.
+    expected = 48 + 48 * 4 + 48 * 4 * 4 + 48 * 4 * 4 * 4
     assert cardinality(mrad_layers, mrad_faces) == expected
-    assert expected == 8_160
+    assert expected == 4_080
 
 
 def test_snapshot_size_matches_cardinality(mrad_layers, mrad_faces, synthesis):

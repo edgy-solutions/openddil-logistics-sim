@@ -48,11 +48,14 @@ asset_profiles:
     # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
     # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
     # only resolve when both sides agree on the grid. Tree cardinality
-    # was 96 × 6 × 4 × 9 = 23,712 elements (~5MB serialized) — too big
-    # for integrated GPUs on work machines, WebGL context died on first
-    # load. Reduced to 96 × 4 × 4 × 4 = 8,160 (~1.6MB) which holds
-    # context on Intel UHD-class hardware while keeping a meaningful
-    # 2×2 drill at every level.
+    # history:
+    #   23,712 (96 × 6×4×9) — 5MB serialized, WebGL DOA on integrated GPU
+    #    8,160 (96 × 4×4×4) — 1.6MB,         WebGL still died on switch
+    #    4,080 (48 × 4×4×4) — 0.8MB,         current — face shrunk to 6×8
+    # Face shrunk + frameloop=demand on the Canvas together (see
+    # SensorArrayView.tsx) bring per-frame GPU work low enough for
+    # Intel UHD-class hardware to hold the WebGL context across
+    # asset switches.
     layers:
       - name: RADAR UNIT
         prefix: TR
@@ -70,8 +73,8 @@ asset_profiles:
         rows: 2
     faces:
       - name: PRIMARY APERTURE
-        cols: 8
-        rows: 12
+        cols: 6
+        rows: 8
     synthesis:
       health_nominal_min: 0.55
       health_nominal_max: 0.85
