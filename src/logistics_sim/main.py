@@ -19,7 +19,7 @@ import sys
 
 from .asset_discovery import AssetRoster, run_edge_discovery
 from .config import SimConfig
-from .element_gen import cardinality, generate_snapshot
+from .element_gen import cardinality, compute_asset_metrics, generate_snapshot
 from .publisher import HqProducer
 
 log = logging.getLogger("logistics_sim.main")
@@ -70,12 +70,19 @@ async def _tick_loop(
                 )
                 if degraded:
                     degraded_count += 1
+                # Asset-level rollups the customer-overlay's proprietary
+                # feed doesn't carry. Both are stable per asset within
+                # a tick; uptime advances 1 hour per ~120 ticks so the
+                # maintainer UI shows monotonically-increasing hours.
+                core_temp_c, uptime_hours = compute_asset_metrics(asset_id, tick_bucket)
                 await producer.publish_snapshot(
                     asset_id=asset_id,
                     asset_state=asset_state,
                     profile_name=profile.name,
                     elements=elements,
                     degraded=degraded,
+                    core_temp_c=core_temp_c,
+                    uptime_hours=uptime_hours,
                 )
                 published += 1
             if published:

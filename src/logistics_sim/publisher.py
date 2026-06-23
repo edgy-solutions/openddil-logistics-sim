@@ -78,21 +78,33 @@ class HqProducer:
         profile_name: str,
         elements: list[ElementTelemetry],
         degraded: bool,
+        core_temp_c: float | None = None,
+        uptime_hours: float | None = None,
     ) -> None:
         if self._producer is None:
             raise RuntimeError("HqProducer.publish_snapshot called before start()")
+        operational: dict = {
+            "power_state": asset_state.power_state,
+            "health_state": asset_state.health_state,
+            "actively_transmitting": asset_state.actively_transmitting,
+            "actively_receiving": asset_state.actively_receiving,
+            "degraded": degraded,
+        }
+        # Asset-level rollup metrics the customer-overlay feed doesn't
+        # populate (no sustainment block). logistics-sim fills the gap
+        # — see element_gen.compute_asset_metrics. Lands in the row's
+        # operational JSONB; the maintainer view's CORE TEMP / UPTIME
+        # readouts pick them up via useAssetElementTelemetry.
+        if core_temp_c is not None:
+            operational["core_temp_c"] = core_temp_c
+        if uptime_hours is not None:
+            operational["uptime_hours"] = uptime_hours
         envelope = {
             "asset_id": asset_id,
             "platform_variant": asset_state.platform_variant,
             "profile_name": profile_name,
             "observed_at_ns": time.time_ns(),
-            "operational": {
-                "power_state": asset_state.power_state,
-                "health_state": asset_state.health_state,
-                "actively_transmitting": asset_state.actively_transmitting,
-                "actively_receiving": asset_state.actively_receiving,
-                "degraded": degraded,
-            },
+            "operational": operational,
             "elements": [dataclasses.asdict(e) for e in elements],
         }
         payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")

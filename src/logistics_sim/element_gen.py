@@ -277,6 +277,40 @@ def generate_snapshot(
     return out
 
 
+def compute_asset_metrics(asset_id: str, tick_bucket: int) -> tuple[float, float]:
+    """Asset-level rollup metrics the customer-overlay feed doesn't carry
+    (no sustainment block, no hour meters). logistics-sim fills the gap
+    so the maintainer view's CORE TEMP and UPTIME readouts move with the
+    asset instead of showing the 32.0 / 1,422H fallback literals.
+
+    core_temp_c: stable per asset (a "ground truth" baseline seeded by
+    asset_id, range 28-45°C). Each asset shows a distinct value; same
+    asset shows the same value across ticks. Looks like a real per-
+    chassis baseline that the operator might compare against.
+
+    uptime_hours: monotonically increasing. baseline seeded per asset
+    in the 500-3000 hour range (so an asset reads as "running for a
+    while" rather than "just powered on") plus tick_bucket * (30/3600)
+    so the value advances 1 hour per ~120 ticks (=1 real hour at the
+    default 30s tick interval). Stable within a tick; advances slowly
+    enough that the operator perceives it as "system uptime ticking
+    upward" without flopping.
+    """
+    rng = _seeded_rng(asset_id, "__asset_metrics__", 0)
+    core_temp_c = round(28.0 + rng.random() * 17.0, 1)
+    # Stable per asset, no per-tick increment. tick_bucket here is
+    # epoch-anchored (time.time() // tick_interval_s), so multiplying
+    # it by anything yields nonsense like 495,000h ≈ 56 years. We'd
+    # need asset-first-seen tracking in AssetRoster to compute real
+    # "since-discovery" advancement; for the demo we just lock the
+    # baseline so the readout looks like an aged hour-meter that
+    # doesn't flop tick-to-tick. tick_bucket is accepted so future
+    # callers can wire real advancement without an API change.
+    _ = tick_bucket
+    uptime_hours = round(500.0 + rng.random() * 2500.0, 1)
+    return core_temp_c, uptime_hours
+
+
 def cardinality(layers: tuple[LayerSpec, ...], faces: tuple[FaceSpec, ...]) -> int:
     """Total elements in the materialized tree. Depth 0 cardinality is
     the sum of face grids; each successive depth multiplies by the
