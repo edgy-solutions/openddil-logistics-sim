@@ -55,6 +55,12 @@ class HqProducer:
             bootstrap_servers=self._brokers,
             acks=1,
             enable_idempotence=False,
+            # Per-asset element-tree envelope can run ~5MB (96 face × 6
+            # boards × 4 modules × 9 chips = 23,712 elements at ~170B
+            # each). Default 1MB max_request_size would reject it.
+            # Topic-level max.message.bytes must match (see docker-
+            # compose redpanda-init).
+            max_request_size=16 * 1024 * 1024,
         )
         await self._producer.start()
         log.info("HQ producer started (brokers=%s topic=%s)",
