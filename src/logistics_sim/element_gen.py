@@ -1,29 +1,47 @@
 """
-Per-element telemetry generator.
+Per-element telemetry generator — TREE TOPOLOGY with parent-child rollup.
 
-Deterministic per (asset_id, element_id, tick_bucket) -- same asset
-stays consistent across re-renders, different assets are independent,
-tick advancement produces movement.
+Each MRAD asset is modelled as a true tree:
 
-Honors upstream `AssetState` (snapshot of operational_state +
-actively_tx/rx from the customer's telemetry-latest-state feed):
+  TR (96 face elements)
+    └── BOARD (6 per TR — 576 total)
+          └── MODULE (4 per board — 2,304 total)
+                └── CHIP (9 per module — 20,736 total)
+  Total: 23,712 elements per asset.
 
-  * When the asset is in a degraded power_state / health_state,
-    `degraded` is set True by the tick loop and synthesis.degraded_
-    fraction of elements jump to the >0.90 (DEGRADED) or >0.97
-    (CRITICAL) band.
+Element ids are PATH-ENCODED so each parent's children are distinct from
+every other parent's children:
 
-  * Face elements (depth 0, T/R modules) honor actively_transmitting
-    and actively_receiving FROM THE CUSTOMER SIM directly -- those
-    fields ride along on every published element so the maintainer
-    view's interrogation panel can show "TX off" / "RX off" badges
-    that match the customer's reported state. Non-face elements
-    (support electronics) default tx_active=rx_active=True.
+  TR-PRIMARYAPERTURE-3-5/BOARD-0-1/MODULE-1-1/CHIP-0-2
 
-  * When tx OR rx is reported off but power_state is supposed to be
-    ON, that's a state mismatch -- treated as degraded (face elements
-    that "can't transmit when they should" lean toward higher health
-    values = more red).
+Drilling into TR-A and TR-B at the maintainer view shows DIFFERENT BOARD-0-0
+elements (because their paths differ), and each board's children are
+independent in turn. This is what gives the demo intuitive consistency
+when a maintainer drills into a yellow square and expects to find the
+yellow component underneath.
+
+Severity ROLLS UP top-down via the max-rollup invariant:
+
+  * A child's severity tier never exceeds its parent's. NOMINAL parent →
+    all children NOMINAL (health ≤ 0.89). DEGRADED parent → children
+    NOMINAL or DEGRADED (health ≤ 0.965). CRITICAL parent → no cap.
+  * At least ONE child shares the parent's tier (when parent is DEGRADED
+    or CRITICAL). Without this, drilling into a yellow board could
+    surface all-green modules, which defeats the maintenance UX.
+
+Determinism: per (asset_id, element_id, tick_bucket). Same asset + same
+tick → identical tree. Different tick → values move (noise drift only;
+the structure is identical).
+
+Honors upstream `AssetState`:
+  * When the asset reports degraded power_state / health_state (or the
+    tx-and-rx-both-off mismatch), `degraded` fires and ~degraded_fraction
+    of FACE elements get bumped into the >0.90 band. Their subtrees
+    inherit via the rollup invariant above.
+  * Face elements (depth 0, T/R modules) inherit asset-level
+    actively_transmitting / actively_receiving directly. Internal
+    elements (BACKPLANE / PROCESSOR / CHIP) are support electronics —
+    always tx_active=rx_active=True.
 """
 from __future__ import annotations
 
@@ -33,6 +51,11 @@ import random
 from typing import Iterator
 
 from .config import FaceSpec, LayerSpec, SynthesisKnobs
+
+
+# Severity thresholds — MUST match the frontend's getStatusFromHealth.
+_TIER_CRITICAL = 0.97
+_TIER_DEGRADED = 0.90
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,26 +83,13 @@ class AssetState:
         if self.health_state in degraded_health_states:
             return True
         if not self.actively_transmitting and not self.actively_receiving:
-            # Asset claims to be ON but is transmitting nothing AND
-            # receiving nothing -- maintenance-relevant for the
-            # operator regardless of how the customer feed labeled
-            # the health_state.
             return True
         return False
 
 
 @dataclasses.dataclass(frozen=True)
 class ElementTelemetry:
-    """One element's instantaneous values.
-
-    tx_active / rx_active are propagated FROM THE CUSTOMER SIM via the
-    asset's OperationalState.actively_transmitting /
-    actively_receiving fields. Face elements (depth 0, T/R modules)
-    inherit the asset-level flags directly so the maintainer view can
-    show their tx/rx state in lockstep with what the customer feed
-    reports. Internal layers (BACKPLANE / PROCESSOR / CHIP) default
-    to both true -- they're support electronics, not radio modules.
-    """
+    """One element's instantaneous values."""
     element_id: str
     layer_depth: int
     layer_name: str
@@ -97,23 +107,50 @@ def _seeded_rng(asset_id: str, element_id: str, tick_bucket: int) -> random.Rand
     return random.Random(seed)
 
 
-def _element_ids_for_layer(
-    depth: int,
-    layer: LayerSpec,
-    faces: tuple[FaceSpec, ...],
-) -> Iterator[str]:
-    """Same id format the frontend SensorArrayView generates -- locked
-    in by test_element_id_format_matches_frontend."""
-    if depth == 0:
-        for face in faces:
-            face_token = face.name.replace(" ", "")
-            for i in range(face.cols):
-                for j in range(face.rows):
-                    yield f"{layer.prefix}-{face_token}-{i}-{j}"
-    else:
-        for i in range(layer.cols):
-            for j in range(layer.rows):
-                yield f"{layer.prefix}-{i}-{j}"
+def _tier(health: float) -> str:
+    if health > _TIER_CRITICAL:
+        return "CRITICAL"
+    if health > _TIER_DEGRADED:
+        return "DEGRADED"
+    return "NOMINAL"
+
+
+def _cap_to_parent_tier(health: float, parent_health: float | None) -> float:
+    """Max-rollup invariant: a child's health (severity) never exceeds
+    its parent's. NOMINAL parent caps children below DEGRADED threshold;
+    DEGRADED parent caps below CRITICAL; CRITICAL parent imposes no cap.
+    parent_health=None (depth 0, no parent) imposes no cap either."""
+    if parent_health is None:
+        return health
+    if parent_health > _TIER_CRITICAL:
+        return health
+    if parent_health > _TIER_DEGRADED:
+        return min(health, _TIER_CRITICAL - 0.005)
+    return min(health, _TIER_DEGRADED - 0.01)
+
+
+def _ensure_at_least_one_match(
+    child_healths: list[float],
+    parent_health: float | None,
+    invariant_rng: random.Random,
+) -> list[float]:
+    """If parent is DEGRADED or CRITICAL but no child has reached that
+    tier (after capping), promote the first child so the maintainer
+    drill-down always shows at least one matching child. Without this,
+    drilling into a yellow board could surface all-green modules — the
+    original demo bug this whole refactor exists to fix."""
+    if parent_health is None:
+        return child_healths
+    parent_tier = _tier(parent_health)
+    if parent_tier == "NOMINAL":
+        return child_healths
+    if any(_tier(h) == parent_tier for h in child_healths):
+        return child_healths
+    if parent_tier == "CRITICAL":
+        child_healths[0] = invariant_rng.uniform(_TIER_CRITICAL + 0.005, 1.00)
+    else:  # DEGRADED
+        child_healths[0] = invariant_rng.uniform(_TIER_DEGRADED + 0.005, _TIER_CRITICAL - 0.005)
+    return child_healths
 
 
 def generate_snapshot(
@@ -126,70 +163,153 @@ def generate_snapshot(
     degraded_power_states: tuple[str, ...],
     degraded_health_states: tuple[str, ...],
 ) -> list[ElementTelemetry]:
-    """Build a full per-asset element-telemetry snapshot for one tick.
+    """Build a full per-asset element-telemetry tree for one tick.
 
-    `degraded` is computed from asset_state.is_degraded(...) -- no
-    longer a free knob from the caller. The synthesis bumps face
-    elements into the DEGRADED / CRITICAL band when the upstream
-    customer-sim state is non-nominal, so what the maintainer sees on
-    the 3D drill-down is in sync with the rolled-up state the
-    operator already saw at the asset level.
+    Walks the configured layer hierarchy depth-first, emitting one
+    ElementTelemetry per node. Path-encoded element ids make each
+    parent's children distinct from every other parent's. Top-down
+    rollup ensures children never exceed parent severity.
+
+    DEMO STABILITY: health values are seeded WITHOUT the tick_bucket
+    (i.e. `_seeded_rng(asset_id, elem_id, 0)`), so a given element's
+    health — and therefore its color tier — is constant across every
+    tick of the run. Operators walking the maintainer view see a
+    stable picture; a degraded TR stays degraded, a nominal one stays
+    nominal. temp_c and load_pct keep a small per-tick gauss drift so
+    the numeric readouts move a little (looks "alive" without flopping
+    the tier). When asset_state.is_degraded flips (customer feed
+    reports a fault), the SAME deterministic subset of elements
+    elevates — visible color change, but still stable across ticks
+    until the asset-level state flips back.
     """
     out: list[ElementTelemetry] = []
-    degraded = asset_state.is_degraded(degraded_power_states, degraded_health_states)
+    degraded_asset = asset_state.is_degraded(degraded_power_states, degraded_health_states)
     asset_tx = asset_state.actively_transmitting
     asset_rx = asset_state.actively_receiving
 
-    for depth, layer in enumerate(layers):
-        for elem_id in _element_ids_for_layer(depth, layer, faces):
-            rng = _seeded_rng(asset_id, elem_id, tick_bucket)
-
-            # Health -- nominal band unless asset-level degraded fires.
-            health = rng.uniform(synthesis.health_nominal_min, synthesis.health_nominal_max)
-            if degraded and rng.random() < synthesis.degraded_fraction:
-                if rng.random() < 0.4:
-                    health = rng.uniform(0.97, 1.00)
-                else:
-                    health = rng.uniform(0.90, 0.97)
-
-            # Temp ramps with health; tick drift adds Gaussian wander.
-            base_temp = synthesis.temp_min + health * (synthesis.temp_max - synthesis.temp_min)
-            temp_c = base_temp + rng.gauss(0, synthesis.tick_drift_temp)
-
-            base_load = rng.uniform(synthesis.load_min, synthesis.load_max)
-            load_pct = max(0.0, min(100.0, base_load + rng.gauss(0, synthesis.tick_drift_load)))
-
-            # tx/rx per element:
-            #   Face elements (depth 0) ARE the T/R modules -- they
-            #   inherit asset-level tx/rx directly.
-            #   Internal elements are support electronics -- always
-            #   both true (they're not radios).
-            if depth == 0:
-                tx_active = asset_tx
-                rx_active = asset_rx
+    def _synth_health(elem_id: str, parent_health: float | None) -> float:
+        # Tick-invariant seed: same element always gets the same health
+        # roll, so tier colors don't flop between ticks. The degraded
+        # bump uses the same RNG so the same ~15% of elements light up
+        # whenever the asset is in a degraded state.
+        rng = _seeded_rng(asset_id, elem_id, 0)
+        health = rng.uniform(synthesis.health_nominal_min, synthesis.health_nominal_max)
+        if degraded_asset and rng.random() < synthesis.degraded_fraction:
+            if rng.random() < 0.4:
+                health = rng.uniform(_TIER_CRITICAL, 1.00)
             else:
-                tx_active = True
-                rx_active = True
+                health = rng.uniform(_TIER_DEGRADED, _TIER_CRITICAL)
+        return _cap_to_parent_tier(health, parent_health)
 
-            out.append(ElementTelemetry(
-                element_id=elem_id,
-                layer_depth=depth,
-                layer_name=layer.name,
-                health=round(max(0.0, min(1.0, health)), 4),
-                temp_c=round(temp_c, 2),
-                load_pct=round(load_pct, 1),
-                tx_active=tx_active,
-                rx_active=rx_active,
-            ))
+    def _build_node(
+        elem_id: str, depth: int, layer_name: str, health: float,
+    ) -> None:
+        # Two RNG streams: stable (per element, never varies) anchors
+        # the baseline temp/load values; drift (per element per tick)
+        # adds the small per-tick gauss wander.
+        stable = _seeded_rng(asset_id, elem_id, 0)
+        drift = _seeded_rng(asset_id, elem_id, tick_bucket)
+        # Burn one draw on `stable` to match _synth_health's RNG state
+        # cost — keeps the load draw uncorrelated from the health draw.
+        stable.random()
+        base_temp = synthesis.temp_min + health * (synthesis.temp_max - synthesis.temp_min)
+        temp_c = base_temp + drift.gauss(0, synthesis.tick_drift_temp)
+        base_load = stable.uniform(synthesis.load_min, synthesis.load_max)
+        load_pct = max(0.0, min(100.0, base_load + drift.gauss(0, synthesis.tick_drift_load)))
+        # Face elements ARE the T/R modules — inherit asset-level tx/rx.
+        # Internal layers are support electronics — always both true.
+        tx_active = asset_tx if depth == 0 else True
+        rx_active = asset_rx if depth == 0 else True
+        out.append(ElementTelemetry(
+            element_id=elem_id,
+            layer_depth=depth,
+            layer_name=layer_name,
+            health=round(max(0.0, min(1.0, health)), 4),
+            temp_c=round(temp_c, 2),
+            load_pct=round(load_pct, 1),
+            tx_active=tx_active,
+            rx_active=rx_active,
+        ))
+
+    def _recurse(parent_id: str | None, parent_health: float | None, depth: int) -> None:
+        if depth >= len(layers):
+            return
+        layer = layers[depth]
+
+        if depth == 0:
+            # Face elements — one grid per FaceSpec. No parent constraint.
+            for face in faces:
+                face_token = face.name.replace(" ", "")
+                cell_specs: list[tuple[str, float]] = []
+                for i in range(face.cols):
+                    for j in range(face.rows):
+                        elem_id = f"{layer.prefix}-{face_token}-{i}-{j}"
+                        h = _synth_health(elem_id, None)
+                        cell_specs.append((elem_id, h))
+                for elem_id, h in cell_specs:
+                    _build_node(elem_id, 0, layer.name, h)
+                    _recurse(elem_id, h, 1)
+            return
+
+        # Internal layer — generate children of parent_id.
+        assert parent_id is not None
+        cell_specs2: list[tuple[str, float]] = []
+        for i in range(layer.cols):
+            for j in range(layer.rows):
+                elem_id = f"{parent_id}/{layer.prefix}-{i}-{j}"
+                h = _synth_health(elem_id, parent_health)
+                cell_specs2.append((elem_id, h))
+
+        # Enforce "at least one child shares parent tier" using a
+        # TICK-INVARIANT seed (third arg = 0). Demo stability: same
+        # parent always promotes the same child, so colors don't
+        # rearrange tick-to-tick.
+        invariant_rng = _seeded_rng(asset_id, parent_id + "|invariant", 0)
+        healths = _ensure_at_least_one_match(
+            [h for _, h in cell_specs2], parent_health, invariant_rng,
+        )
+
+        for (elem_id, _orig_h), h in zip(cell_specs2, healths):
+            _build_node(elem_id, depth, layer.name, h)
+            _recurse(elem_id, h, depth + 1)
+
+    _recurse(None, None, 0)
     return out
 
 
 def cardinality(layers: tuple[LayerSpec, ...], faces: tuple[FaceSpec, ...]) -> int:
-    """Count of elements one snapshot will contain."""
-    total = 0
-    for depth, layer in enumerate(layers):
-        if depth == 0:
-            total += sum(f.cols * f.rows for f in faces)
-        else:
-            total += layer.cols * layer.rows
+    """Total elements in the materialized tree. Depth 0 cardinality is
+    the sum of face grids; each successive depth multiplies by the
+    layer's cols×rows fanout."""
+    if not layers:
+        return 0
+    depth_0 = sum(f.cols * f.rows for f in faces)
+    total = depth_0
+    fanout = depth_0
+    for d in range(1, len(layers)):
+        layer = layers[d]
+        per_parent = layer.cols * layer.rows
+        fanout *= per_parent
+        total += fanout
     return total
+
+
+# Kept for backward compat with any external caller that imported it.
+def _element_ids_for_layer(
+    depth: int,
+    layer: LayerSpec,
+    faces: tuple[FaceSpec, ...],
+) -> Iterator[str]:  # pragma: no cover - shape preserved, no longer used internally
+    """DEPRECATED: flat-id helper. The tree generator uses path-encoded
+    ids inside generate_snapshot now. This function is retained only as
+    a contract-shim — do not introduce new callers."""
+    if depth == 0:
+        for face in faces:
+            face_token = face.name.replace(" ", "")
+            for i in range(face.cols):
+                for j in range(face.rows):
+                    yield f"{layer.prefix}-{face_token}-{i}-{j}"
+    else:
+        for i in range(layer.cols):
+            for j in range(layer.rows):
+                yield f"{layer.prefix}-{i}-{j}"

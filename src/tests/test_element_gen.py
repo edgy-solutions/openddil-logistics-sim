@@ -63,7 +63,11 @@ def _nominal_state(variant: str = "MRAD2_radar") -> AssetState:
 
 
 def test_cardinality_matches_layout(mrad_layers, mrad_faces):
-    assert cardinality(mrad_layers, mrad_faces) == 96 + 6 + 4 + 9
+    # Tree topology — depth-0 face × (per-layer cols×rows)^depth fanout.
+    # 96 + 96*6 + 96*6*4 + 96*6*4*9 = 23,712.
+    expected = 96 + 96 * 6 + 96 * 6 * 4 + 96 * 6 * 4 * 9
+    assert cardinality(mrad_layers, mrad_faces) == expected
+    assert expected == 23_712
 
 
 def test_snapshot_size_matches_cardinality(mrad_layers, mrad_faces, synthesis):
@@ -79,8 +83,10 @@ def test_snapshot_size_matches_cardinality(mrad_layers, mrad_faces, synthesis):
 
 
 def test_element_id_format_matches_frontend(mrad_layers, mrad_faces, synthesis):
-    """Locks in the frontend contract -- element id format MUST match
-    SensorArrayView.generateElements() byte-for-byte."""
+    """Locks in the frontend contract — path-encoded element ids. The
+    frontend's SensorArrayView constructs the same ids using its
+    drillPath stack + per-cell (i,j); both sides MUST agree byte-for-
+    byte or the lookup misses."""
     snap = generate_snapshot(
         asset_id="any-asset",
         asset_state=_nominal_state(),
@@ -90,9 +96,11 @@ def test_element_id_format_matches_frontend(mrad_layers, mrad_faces, synthesis):
         degraded_health_states=DEGRADED_HEALTH,
     )
     surface = re.compile(r"^TR-PRIMARYAPERTURE-\d+-\d+$")
-    backplane = re.compile(r"^BOARD-\d+-\d+$")
-    proc = re.compile(r"^MODULE-\d+-\d+$")
-    chip = re.compile(r"^CHIP-\d+-\d+$")
+    backplane = re.compile(r"^TR-PRIMARYAPERTURE-\d+-\d+/BOARD-\d+-\d+$")
+    proc = re.compile(r"^TR-PRIMARYAPERTURE-\d+-\d+/BOARD-\d+-\d+/MODULE-\d+-\d+$")
+    chip = re.compile(
+        r"^TR-PRIMARYAPERTURE-\d+-\d+/BOARD-\d+-\d+/MODULE-\d+-\d+/CHIP-\d+-\d+$"
+    )
     for e in snap:
         if e.layer_depth == 0:
             assert surface.match(e.element_id), e.element_id
@@ -102,6 +110,77 @@ def test_element_id_format_matches_frontend(mrad_layers, mrad_faces, synthesis):
             assert proc.match(e.element_id), e.element_id
         elif e.layer_depth == 3:
             assert chip.match(e.element_id), e.element_id
+
+
+def test_rollup_invariant_no_child_exceeds_parent_severity(mrad_layers, mrad_faces, synthesis):
+    """Drill-down consistency: a child's severity tier never exceeds
+    its parent's. Drilling into a NOMINAL board MUST NOT show a
+    CRITICAL module under it."""
+    state = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAULT",  # asset is degraded → some severity to roll up
+    )
+    snap = generate_snapshot("asset-rollup", state,
+                             mrad_layers, mrad_faces, synthesis, tick_bucket=3,
+                             degraded_power_states=DEGRADED_POWER,
+                             degraded_health_states=DEGRADED_HEALTH)
+    by_id = {e.element_id: e for e in snap}
+    for e in snap:
+        if "/" not in e.element_id:
+            continue  # depth 0 has no parent
+        parent_id = e.element_id.rsplit("/", 1)[0]
+        parent = by_id[parent_id]
+        if parent.health <= 0.90:
+            assert e.health <= 0.90 + 1e-6, (
+                f"NOMINAL parent {parent_id} ({parent.health}) "
+                f"has non-NOMINAL child {e.element_id} ({e.health})"
+            )
+        elif parent.health <= 0.97:
+            assert e.health <= 0.97 + 1e-6, (
+                f"DEGRADED parent {parent_id} ({parent.health}) "
+                f"has CRITICAL child {e.element_id} ({e.health})"
+            )
+        # CRITICAL parent — no constraint on child
+
+
+def test_rollup_invariant_at_least_one_child_matches_parent_tier(mrad_layers, mrad_faces, synthesis):
+    """Drilling into a yellow or red parent MUST surface at least one
+    child in the same tier — otherwise the maintenance drill-down
+    fails the "follow the red" UX."""
+    state = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAULT",
+    )
+    snap = generate_snapshot("asset-match", state,
+                             mrad_layers, mrad_faces, synthesis, tick_bucket=7,
+                             degraded_power_states=DEGRADED_POWER,
+                             degraded_health_states=DEGRADED_HEALTH)
+    children_by_parent: dict[str, list] = {}
+    for e in snap:
+        if "/" not in e.element_id:
+            continue
+        parent_id = e.element_id.rsplit("/", 1)[0]
+        children_by_parent.setdefault(parent_id, []).append(e)
+    by_id = {e.element_id: e for e in snap}
+    checked = 0
+    for parent_id, children in children_by_parent.items():
+        parent = by_id[parent_id]
+        if parent.health <= 0.90:
+            continue  # NOMINAL parent — no obligation
+        checked += 1
+        if parent.health > 0.97:
+            assert any(c.health > 0.97 for c in children), (
+                f"CRITICAL parent {parent_id} ({parent.health}) "
+                f"has no CRITICAL child (children: {[c.health for c in children]})"
+            )
+        else:  # DEGRADED parent
+            assert any(c.health > 0.90 for c in children), (
+                f"DEGRADED parent {parent_id} ({parent.health}) "
+                f"has no DEGRADED-or-CRITICAL child (children: {[c.health for c in children]})"
+            )
+    assert checked > 0, "test must actually exercise non-NOMINAL parents"
 
 
 def test_deterministic_per_asset_and_tick(mrad_layers, mrad_faces, synthesis):
@@ -141,7 +220,16 @@ def test_values_in_bounds(mrad_layers, mrad_faces, synthesis):
         assert 0.0 <= e.load_pct <= 100.0
 
 
-def test_tick_advancement_moves_values(mrad_layers, mrad_faces, synthesis):
+def test_tick_advancement_keeps_health_stable_drifts_temp_load(mrad_layers, mrad_faces, synthesis):
+    """Demo stability invariant: health (which drives color tier) is
+    seeded WITHOUT tick_bucket, so it stays constant across every
+    tick of the run. temp_c and load_pct keep a small per-tick gauss
+    drift so numeric readouts still move (otherwise the UI looks
+    frozen). Operators walking the maintainer view see stable colors;
+    a yellow tile stays yellow across multiple sim ticks. The earlier
+    contract (health varies per tick) was demo-hostile — switching
+    happens on asset_state.is_degraded transitions instead, not on
+    the wall clock."""
     t0 = generate_snapshot("asset-A", _nominal_state(),
                            mrad_layers, mrad_faces, synthesis, tick_bucket=0,
                            degraded_power_states=DEGRADED_POWER,
@@ -150,7 +238,42 @@ def test_tick_advancement_moves_values(mrad_layers, mrad_faces, synthesis):
                            mrad_layers, mrad_faces, synthesis, tick_bucket=1,
                            degraded_power_states=DEGRADED_POWER,
                            degraded_health_states=DEGRADED_HEALTH)
-    assert [e.health for e in t0] != [e.health for e in t1]
+    # Same element id at two ticks → same health.
+    h0 = {e.element_id: e.health for e in t0}
+    h1 = {e.element_id: e.health for e in t1}
+    assert h0 == h1, "health values must be tick-invariant for demo stability"
+    # temp/load DO drift (so the UI numeric panels still move per tick).
+    temps0 = {e.element_id: e.temp_c for e in t0}
+    temps1 = {e.element_id: e.temp_c for e in t1}
+    assert temps0 != temps1, "temp_c should still drift per tick (small gauss noise)"
+
+
+def test_asset_degraded_transition_changes_health(mrad_layers, mrad_faces, synthesis):
+    """When the asset's operational state flips from nominal to
+    degraded (or back), the deterministic ~15% subset elevates (or
+    returns to nominal). This is the ONLY thing that moves color
+    tiers — not the wall clock. Without this, the maintainer view
+    couldn't react to a customer-feed-reported fault."""
+    nominal = _nominal_state()
+    degraded = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAULT",
+    )
+    snap_nominal = generate_snapshot("asset-X", nominal,
+                                     mrad_layers, mrad_faces, synthesis, tick_bucket=42,
+                                     degraded_power_states=DEGRADED_POWER,
+                                     degraded_health_states=DEGRADED_HEALTH)
+    snap_degraded = generate_snapshot("asset-X", degraded,
+                                      mrad_layers, mrad_faces, synthesis, tick_bucket=42,
+                                      degraded_power_states=DEGRADED_POWER,
+                                      degraded_health_states=DEGRADED_HEALTH)
+    # Many elements MUST differ — the degraded synthesis branch fired
+    # for ~15% of them.
+    h_nom = {e.element_id: e.health for e in snap_nominal}
+    h_deg = {e.element_id: e.health for e in snap_degraded}
+    diffs = sum(1 for k in h_nom if h_nom[k] != h_deg[k])
+    assert diffs > 0, "degraded transition must elevate some elements"
 
 
 # -----------------------------------------------------------------------------
