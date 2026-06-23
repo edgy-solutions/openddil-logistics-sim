@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 
+from .aliases import load_variant_aliases
 from .asset_discovery import AssetRoster, run_edge_discovery
 from .config import SimConfig
 from .element_gen import cardinality, compute_asset_metrics, generate_snapshot
@@ -111,6 +112,12 @@ async def _serve(cfg: SimConfig) -> int:
     matched = cfg.all_matched_variants
     log.info("discovering assets with platform_variant in %s", sorted(matched))
 
+    # Load the native->canonical alias map ONCE at startup. The map is
+    # passed by reference to every per-edge discovery task; canonicalization
+    # is cheap (dict.get) on the hot path. Empty map (file missing) is
+    # the dev-environment fallback -- match canonical-only.
+    canonical_map = load_variant_aliases()
+
     tasks: list[asyncio.Task[None]] = []
     for edge_id, brokers in cfg.edge_clusters.items():
         consumer_group = f"{cfg.consumer_group_prefix}-{edge_id}"
@@ -122,6 +129,7 @@ async def _serve(cfg: SimConfig) -> int:
                 consumer_group=consumer_group,
                 matched_variants=matched,
                 roster=roster,
+                variant_canonical_map=canonical_map,
             ),
             name=f"discovery-{edge_id}",
         ))
