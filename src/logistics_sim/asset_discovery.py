@@ -18,9 +18,10 @@ Two jobs in one consumer:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from aiokafka import AIOKafkaConsumer
 
@@ -123,6 +124,31 @@ def _asset_state_from_json(data: dict) -> tuple[str, str, AssetState] | None:
     return str(asset_id), str(variant), state
 
 
+def _proto_bool_with_default(msg, field_name: str, default: bool) -> bool:
+    """Read a proto bool field with sane default-on-absence semantics
+    across BOTH proto2/proto3-optional AND plain proto3 scalars.
+
+    Plain proto3 scalars (no `optional` keyword) DO NOT support
+    `HasField` -- calling it raises `ValueError: Field X does not have
+    presence`. That killed the sim's discovery consumer on the very
+    first message it tried to decode (edge-01 only, because edges
+    without inbound data sit idle and never call this path).
+
+    Behavior:
+      * If `HasField` works AND field is unset -> return `default`.
+      * If `HasField` works AND field is set   -> return the value.
+      * If `HasField` raises (proto3 scalar)   -> use the wire value;
+        proto3 cannot distinguish 'unset' from 'explicit false', so
+        defaulting on absence is impossible here.
+    """
+    try:
+        if not msg.HasField(field_name):
+            return default
+    except ValueError:
+        pass  # proto3 scalar without optional -- value-only path
+    return bool(getattr(msg, field_name))
+
+
 def _asset_state_from_proto(raw: bytes) -> tuple[str, str, AssetState] | None:
     """Proto-encoded EntityTelemetryEvent path. Same triple, populated
     via the proto field accessors so enum ints become enum names via
@@ -141,8 +167,8 @@ def _asset_state_from_proto(raw: bytes) -> tuple[str, str, AssetState] | None:
         platform_variant=ev.asset.platform_variant,
         power_state=_POWER_STATE_NAME.get(op.power_state, "POWER_STATE_UNSPECIFIED"),
         health_state=_HEALTH_STATE_NAME.get(op.health_state, "HEALTH_STATE_UNSPECIFIED"),
-        actively_transmitting=bool(op.actively_transmitting) if op.HasField("actively_transmitting") else True,
-        actively_receiving=bool(op.actively_receiving) if op.HasField("actively_receiving") else True,
+        actively_transmitting=_proto_bool_with_default(op, "actively_transmitting", True),
+        actively_receiving=_proto_bool_with_default(op, "actively_receiving", True),
     )
     return ev.asset.asset_id, ev.asset.platform_variant, state
 
@@ -169,12 +195,22 @@ async def run_edge_discovery(
     consumer_group: str,
     matched_variants: Iterable[str],
     roster: AssetRoster,
+    variant_canonical_map: Mapping[str, str] | None = None,
 ) -> None:
     """One coroutine per edge cluster. Updates the per-asset
     AssetState every time a record arrives -- including the tx/rx
     bits that the tick loop uses to drive element-level synthesis.
+
+    `variant_canonical_map` translates upstream proprietary tokens to
+    canonical OpenDDIL tokens BEFORE matching against
+    `matched_variants`. Required when faust-edge emits
+    telemetry-latest-state with un-aliased customer-feed variants
+    (the standard cluster setup); harmless when empty (the wire is
+    already canonical, every variant looks up to itself).
+    Loaded from `platform_variant_aliases.yaml` by main.py.
     """
     variants = frozenset(matched_variants)
+    canonical_map = variant_canonical_map or {}
     consumer = AIOKafkaConsumer(
         input_topic,
         bootstrap_servers=brokers,
@@ -183,20 +219,43 @@ async def run_edge_discovery(
         enable_auto_commit=True,
     )
     await consumer.start()
-    log.info("[%s] discovery consumer started (brokers=%s topic=%s group=%s)",
-             edge_id, brokers, input_topic, consumer_group)
+    log.info(
+        "[%s] discovery consumer started (brokers=%s topic=%s group=%s "
+        "aliases=%d)",
+        edge_id, brokers, input_topic, consumer_group, len(canonical_map),
+    )
     try:
         async for msg in consumer:
             extracted = _extract(msg.value)
             if not extracted:
                 continue
-            asset_id, variant, state = extracted
-            if variant not in variants:
+            asset_id, native_variant, state = extracted
+            # Canonicalize via the alias map. Unknown -> passthrough,
+            # which matches the dev/docker-compose case where the wire
+            # is already canonical (alias file may not be mounted).
+            canonical = canonical_map.get(native_variant, native_variant)
+            if canonical not in variants:
                 continue
+            # Downstream (tick loop -> profile_for_variant) matches
+            # against canonical too, so rewrite the AssetState's
+            # platform_variant to the canonical token. AssetState is
+            # frozen; use dataclasses.replace.
+            if canonical != native_variant:
+                state = dataclasses.replace(state, platform_variant=canonical)
             is_new = roster.upsert(asset_id, state)
             if is_new:
-                log.info("[%s] discovered asset %s variant=%s (roster=%d)",
-                         edge_id, asset_id, variant, len(roster))
+                if canonical != native_variant:
+                    log.info(
+                        "[%s] discovered asset %s variant=%s "
+                        "(aliased from native=%s, roster=%d)",
+                        edge_id, asset_id, canonical, native_variant,
+                        len(roster),
+                    )
+                else:
+                    log.info(
+                        "[%s] discovered asset %s variant=%s (roster=%d)",
+                        edge_id, asset_id, canonical, len(roster),
+                    )
             elif log.isEnabledFor(logging.DEBUG):
                 # State refresh -- spam at DEBUG only.
                 log.debug(
