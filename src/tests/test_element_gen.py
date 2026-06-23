@@ -24,11 +24,16 @@ from logistics_sim.element_gen import AssetState, cardinality, generate_snapshot
 
 @pytest.fixture
 def mrad_layers() -> tuple[LayerSpec, ...]:
+    # Mirrors config/default.yaml's mrad profile and the frontend
+    # MRAD_CONFIG.layers exactly. Tree is 96 × 4 × 4 × 4 = 8,160
+    # elements per asset (reduced from the original 23,712 to keep
+    # the per-asset wire payload under ~1.6MB so integrated GPUs on
+    # work machines can hold WebGL context on first load).
     return (
         LayerSpec(name="RADAR UNIT",     prefix="TR",     cols=0, rows=0),
-        LayerSpec(name="BACKPLANE",      prefix="BOARD",  cols=2, rows=3),
+        LayerSpec(name="BACKPLANE",      prefix="BOARD",  cols=2, rows=2),
         LayerSpec(name="PROCESSOR BANK", prefix="MODULE", cols=2, rows=2),
-        LayerSpec(name="GAN MMIC CHIP",  prefix="CHIP",   cols=3, rows=3),
+        LayerSpec(name="GAN MMIC CHIP",  prefix="CHIP",   cols=2, rows=2),
     )
 
 
@@ -64,10 +69,10 @@ def _nominal_state(variant: str = "MRAD2_radar") -> AssetState:
 
 def test_cardinality_matches_layout(mrad_layers, mrad_faces):
     # Tree topology — depth-0 face × (per-layer cols×rows)^depth fanout.
-    # 96 + 96*6 + 96*6*4 + 96*6*4*9 = 23,712.
-    expected = 96 + 96 * 6 + 96 * 6 * 4 + 96 * 6 * 4 * 9
+    # 96 + 96*4 + 96*4*4 + 96*4*4*4 = 8,160.
+    expected = 96 + 96 * 4 + 96 * 4 * 4 + 96 * 4 * 4 * 4
     assert cardinality(mrad_layers, mrad_faces) == expected
-    assert expected == 23_712
+    assert expected == 8_160
 
 
 def test_snapshot_size_matches_cardinality(mrad_layers, mrad_faces, synthesis):

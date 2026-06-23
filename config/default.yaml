@@ -44,21 +44,30 @@ asset_profiles:
       - MRAD_Radar
       - MRAD_Interceptor
       - MRAD2_radar   # customer-overlay specific variant token
+    # IMPORTANT: cols×rows MUST match the frontend's MRAD_CONFIG.layers
+    # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
+    # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
+    # only resolve when both sides agree on the grid. Tree cardinality
+    # was 96 × 6 × 4 × 9 = 23,712 elements (~5MB serialized) — too big
+    # for integrated GPUs on work machines, WebGL context died on first
+    # load. Reduced to 96 × 4 × 4 × 4 = 8,160 (~1.6MB) which holds
+    # context on Intel UHD-class hardware while keeping a meaningful
+    # 2×2 drill at every level.
     layers:
       - name: RADAR UNIT
         prefix: TR
       - name: BACKPLANE
         prefix: BOARD
         cols: 2
-        rows: 3
+        rows: 2
       - name: PROCESSOR BANK
         prefix: MODULE
         cols: 2
         rows: 2
       - name: GAN MMIC CHIP
         prefix: CHIP
-        cols: 3
-        rows: 3
+        cols: 2
+        rows: 2
     faces:
       - name: PRIMARY APERTURE
         cols: 8
