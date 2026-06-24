@@ -519,6 +519,26 @@ def test_severity_tier_FAULT_when_tx_rx_both_off_with_nominal_health():
     assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
 
 
+def test_severity_tier_NOMINAL_when_UNSPECIFIED_with_tx_rx_off():
+    """When the upstream feed doesn't populate operational_state at
+    all, the proto3 wire-absent case gives UNSPECIFIED health AND
+    actively_transmitting=False (proto3 scalar default for bool).
+    The mismatch rule MUST NOT fire on this combo -- without that
+    gate, every asset whose feed omits operational_state would be
+    mis-classified as FAULT and light up the maintainer view yellow,
+    which is the exact 2026-06-24 work-cluster regression this rule
+    is here to prevent. Mismatch requires NOMINAL health (positive
+    signal) before treating tx+rx off as a fault."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_UNSPECIFIED",
+        health_state="HEALTH_STATE_UNSPECIFIED",
+        actively_transmitting=False,
+        actively_receiving=False,
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+
+
 def test_severity_tier_DEGRADED_when_health_DEGRADED():
     s = AssetState(
         platform_variant="MRAD2_radar",

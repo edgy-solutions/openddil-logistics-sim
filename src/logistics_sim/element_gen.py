@@ -95,10 +95,27 @@ class AssetState:
           1. health_state == HEALTH_STATE_FAILED               → FAILED
           2. power_state in (POWER_OFF, SHUTTING_DOWN)         → FAILED
           3. health_state == HEALTH_STATE_FAULT                → FAULT
-          4. tx_off AND rx_off (state mismatch with claimed ON) → FAULT
+          4. health_state == HEALTH_STATE_NOMINAL              → FAULT
+             AND tx_off AND rx_off  (state mismatch: asset
+             reports NOMINAL but is neither transmitting nor
+             receiving)
           5. health_state == HEALTH_STATE_DEGRADED             → DEGRADED
           6. power_state == POWER_STATE_MAINTENANCE            → DEGRADED
           7. anything else (NOMINAL, UNSPECIFIED, ON, ...)     → NOMINAL
+
+        Note on the tx/rx mismatch rule (#4): the rule REQUIRES a
+        positive NOMINAL health signal before treating tx_off+rx_off
+        as a fault. Without that gate, an asset whose upstream feed
+        doesn't populate `operational_state` at all (proto3 wire absent)
+        looked like UNSPECIFIED health + tx_off + rx_off (proto3 scalar
+        defaults for bool are False), and the resolver mis-classified
+        EVERY such asset as FAULT -- lighting tiles on the maintainer
+        view for assets that visibly should have shown all-green.
+        Observed 2026-06-24 on the work cluster: customer proprietary
+        feed left operational_state absent, every MRAD lit up yellow.
+        Gating on NOMINAL keeps the mismatch detection useful for the
+        actually-on-but-silent case while no longer firing on the
+        feed-omitted case.
 
         The degraded_power_states / degraded_health_states arguments
         are accepted for back-compat with `is_degraded()` -- not used
@@ -114,7 +131,10 @@ class AssetState:
             return SeverityTier.FAILED
         if h == "HEALTH_STATE_FAULT":
             return SeverityTier.FAULT
-        if not self.actively_transmitting and not self.actively_receiving:
+        # Mismatch rule: requires explicit NOMINAL health (not UNSPECIFIED).
+        if (h == "HEALTH_STATE_NOMINAL"
+                and not self.actively_transmitting
+                and not self.actively_receiving):
             return SeverityTier.FAULT
         if h == "HEALTH_STATE_DEGRADED":
             return SeverityTier.DEGRADED
