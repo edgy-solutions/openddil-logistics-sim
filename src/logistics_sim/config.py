@@ -45,7 +45,37 @@ class LayerSpec:
 class SynthesisKnobs:
     health_nominal_min: float
     health_nominal_max: float
+    # Per-tier fraction of face elements lifted into the yellow (>0.90)
+    # and red (>0.97) health bands when the upstream asset reports that
+    # tier. NOMINAL implicitly = 0/0. The lift propagates to subtree
+    # elements via the rollup cap; a lifted face's children inherit the
+    # tier, so an "elevated face fraction" of (yellow+red)=0.25 with an
+    # 8-deep tree yields roughly 25% of total elements in yellow/red.
+    #
+    # User-visible behavior (from the 2026-06-24 demo prep):
+    #   NOMINAL  asset (health NOMINAL, power ON) → all green
+    #   DEGRADED asset → some yellow only
+    #   FAULT    asset → mostly yellow, a few red
+    #   FAILED   asset → heavier mix of yellow + red
+    #
+    # Mapping for non-health-state inputs:
+    #   POWER_STATE_OFF / SHUTTING_DOWN  → FAILED
+    #   POWER_STATE_MAINTENANCE          → DEGRADED
+    #   tx_off AND rx_off (mismatch)     → FAULT
+    degraded_yellow_fraction: float
+    degraded_red_fraction: float
+    fault_yellow_fraction: float
+    fault_red_fraction: float
+    failed_yellow_fraction: float
+    failed_red_fraction: float
+
+    # LEGACY: kept for back-compat with pre-2026-06-24 configs that
+    # don't carry the per-tier fields. When NONE of the tier_*_fraction
+    # fields are set in the YAML, the loader synthesizes them from
+    # degraded_fraction (split 60% yellow / 40% red across all degraded
+    # tiers, matching the original collapsed behavior).
     degraded_fraction: float
+
     temp_min: float
     temp_max: float
     load_min: float
@@ -180,10 +210,47 @@ def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
         for f in raw.get("faces", [])
     )
     s = raw.get("synthesis", {})
+    legacy_fraction = float(s.get("degraded_fraction", 0.15))
+
+    # Per-tier fraction fields. If ALL six per-tier fields are absent
+    # from the YAML, fall back to the legacy degraded_fraction split
+    # 60% yellow / 40% red across all degraded tiers -- preserves the
+    # pre-2026-06-24 collapsed behavior for old configs.
+    tier_keys = (
+        "degraded_yellow_fraction", "degraded_red_fraction",
+        "fault_yellow_fraction", "fault_red_fraction",
+        "failed_yellow_fraction", "failed_red_fraction",
+    )
+    any_per_tier = any(k in s for k in tier_keys)
+    if any_per_tier:
+        # Pull each field with a sensible default. Default scale per
+        # the 2026-06-24 demo prep (DEGRADED yellow only, FAULT mostly
+        # yellow + some red, FAILED heavier mix).
+        degraded_yellow = float(s.get("degraded_yellow_fraction", 0.15))
+        degraded_red    = float(s.get("degraded_red_fraction",    0.00))
+        fault_yellow    = float(s.get("fault_yellow_fraction",    0.20))
+        fault_red       = float(s.get("fault_red_fraction",       0.05))
+        failed_yellow   = float(s.get("failed_yellow_fraction",   0.30))
+        failed_red      = float(s.get("failed_red_fraction",      0.20))
+    else:
+        # Legacy back-compat: collapse degraded_fraction across tiers.
+        degraded_yellow = legacy_fraction * 0.6
+        degraded_red    = legacy_fraction * 0.4
+        fault_yellow    = legacy_fraction * 0.6
+        fault_red       = legacy_fraction * 0.4
+        failed_yellow   = legacy_fraction * 0.6
+        failed_red      = legacy_fraction * 0.4
+
     synthesis = SynthesisKnobs(
         health_nominal_min=float(s.get("health_nominal_min", 0.55)),
         health_nominal_max=float(s.get("health_nominal_max", 0.85)),
-        degraded_fraction=float(s.get("degraded_fraction", 0.15)),
+        degraded_yellow_fraction=degraded_yellow,
+        degraded_red_fraction=degraded_red,
+        fault_yellow_fraction=fault_yellow,
+        fault_red_fraction=fault_red,
+        failed_yellow_fraction=failed_yellow,
+        failed_red_fraction=failed_red,
+        degraded_fraction=legacy_fraction,
         temp_min=float(s.get("temp_min", 30)),
         temp_max=float(s.get("temp_max", 75)),
         load_min=float(s.get("load_min", 5)),

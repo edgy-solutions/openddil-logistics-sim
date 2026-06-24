@@ -46,6 +46,7 @@ Honors upstream `AssetState`:
 from __future__ import annotations
 
 import dataclasses
+import enum
 import hashlib
 import random
 from typing import Iterator
@@ -56,6 +57,19 @@ from .config import FaceSpec, LayerSpec, SynthesisKnobs
 # Severity thresholds — MUST match the frontend's getStatusFromHealth.
 _TIER_CRITICAL = 0.97
 _TIER_DEGRADED = 0.90
+
+
+class SeverityTier(enum.Enum):
+    """How "bad" the asset is, from the synthesis perspective. Drives
+    per-tile color mix on the maintainer 3D view. Distinct from the
+    raw proto enums (PowerState / HealthState) because those collapse
+    badly into synthesis policy (e.g. MAINTENANCE is a power state but
+    visually reads as "DEGRADED", and tx+rx-both-off is a tx/rx state
+    that visually reads as "FAULT")."""
+    NOMINAL = "NOMINAL"
+    DEGRADED = "DEGRADED"
+    FAULT = "FAULT"
+    FAILED = "FAILED"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,19 +86,52 @@ class AssetState:
     actively_transmitting: bool = True
     actively_receiving: bool = True
 
+    def severity_tier(self,
+                       degraded_power_states: tuple[str, ...],
+                       degraded_health_states: tuple[str, ...]) -> SeverityTier:
+        """Resolve the synthesis severity tier. Mapping (in priority
+        order, first matching rule wins):
+
+          1. health_state == HEALTH_STATE_FAILED               → FAILED
+          2. power_state in (POWER_OFF, SHUTTING_DOWN)         → FAILED
+          3. health_state == HEALTH_STATE_FAULT                → FAULT
+          4. tx_off AND rx_off (state mismatch with claimed ON) → FAULT
+          5. health_state == HEALTH_STATE_DEGRADED             → DEGRADED
+          6. power_state == POWER_STATE_MAINTENANCE            → DEGRADED
+          7. anything else (NOMINAL, UNSPECIFIED, ON, ...)     → NOMINAL
+
+        The degraded_power_states / degraded_health_states arguments
+        are accepted for back-compat with `is_degraded()` -- not used
+        by this resolver, which has its own per-state mapping baked
+        in. Kept so call sites stay symmetric.
+        """
+        del degraded_power_states, degraded_health_states  # unused (see docstring)
+        h = self.health_state
+        p = self.power_state
+        if h == "HEALTH_STATE_FAILED":
+            return SeverityTier.FAILED
+        if p in ("POWER_STATE_OFF", "POWER_STATE_SHUTTING_DOWN"):
+            return SeverityTier.FAILED
+        if h == "HEALTH_STATE_FAULT":
+            return SeverityTier.FAULT
+        if not self.actively_transmitting and not self.actively_receiving:
+            return SeverityTier.FAULT
+        if h == "HEALTH_STATE_DEGRADED":
+            return SeverityTier.DEGRADED
+        if p == "POWER_STATE_MAINTENANCE":
+            return SeverityTier.DEGRADED
+        return SeverityTier.NOMINAL
+
     def is_degraded(self, degraded_power_states: tuple[str, ...],
                     degraded_health_states: tuple[str, ...]) -> bool:
-        """The synthesis "this asset is broken" predicate. Power-OFF /
-        SHUTTING_DOWN / MAINTENANCE OR health DEGRADED / FAULT /
-        FAILED, OR the state mismatch case (asset is supposed to be
-        ON but reports tx and rx both off)."""
-        if self.power_state in degraded_power_states:
-            return True
-        if self.health_state in degraded_health_states:
-            return True
-        if not self.actively_transmitting and not self.actively_receiving:
-            return True
-        return False
+        """Back-compat wrapper: True iff the resolved tier is NOT
+        NOMINAL. Preserves the boolean contract older callers depend
+        on (main.py tick loop's degraded_count tally, publisher's
+        `degraded` envelope field). New code should call
+        severity_tier() directly."""
+        return self.severity_tier(
+            degraded_power_states, degraded_health_states,
+        ) != SeverityTier.NOMINAL
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,22 +230,49 @@ def generate_snapshot(
     until the asset-level state flips back.
     """
     out: list[ElementTelemetry] = []
-    degraded_asset = asset_state.is_degraded(degraded_power_states, degraded_health_states)
+    tier = asset_state.severity_tier(degraded_power_states, degraded_health_states)
     asset_tx = asset_state.actively_transmitting
     asset_rx = asset_state.actively_receiving
 
+    # Per-tier (yellow, red) fractions. NOMINAL gets no lift; everything
+    # else pulls from the SynthesisKnobs matrix populated from the
+    # YAML config (or back-compat-synthesized from degraded_fraction).
+    # The tuple semantic is (yellow_fraction, red_fraction) where
+    # yellow == >0.90 health, red == >0.97 -- thresholds match the
+    # frontend's getStatusFromHealth.
+    if tier is SeverityTier.NOMINAL:
+        tier_yellow, tier_red = 0.0, 0.0
+    elif tier is SeverityTier.DEGRADED:
+        tier_yellow = synthesis.degraded_yellow_fraction
+        tier_red    = synthesis.degraded_red_fraction
+    elif tier is SeverityTier.FAULT:
+        tier_yellow = synthesis.fault_yellow_fraction
+        tier_red    = synthesis.fault_red_fraction
+    else:  # SeverityTier.FAILED
+        tier_yellow = synthesis.failed_yellow_fraction
+        tier_red    = synthesis.failed_red_fraction
+
     def _synth_health(elem_id: str, parent_health: float | None) -> float:
         # Tick-invariant seed: same element always gets the same health
-        # roll, so tier colors don't flop between ticks. The degraded
-        # bump uses the same RNG so the same ~15% of elements light up
-        # whenever the asset is in a degraded state.
+        # roll, so tier colors don't flop between ticks. Per-tier
+        # fractions decide what slice of elements lifts into the yellow
+        # / red bands -- a DEGRADED asset elevates only into yellow,
+        # a FAULT asset adds a small slice of red, a FAILED asset
+        # lifts a heavier slice of both. ALWAYS consume the roll so
+        # RNG state stays consistent regardless of tier (otherwise
+        # a tier change would re-roll DOWNSTREAM elements' base
+        # health values, breaking the demo-stability invariant that
+        # subtree colors are predictable per-asset).
         rng = _seeded_rng(asset_id, elem_id, 0)
         health = rng.uniform(synthesis.health_nominal_min, synthesis.health_nominal_max)
-        if degraded_asset and rng.random() < synthesis.degraded_fraction:
-            if rng.random() < 0.4:
-                health = rng.uniform(_TIER_CRITICAL, 1.00)
-            else:
-                health = rng.uniform(_TIER_DEGRADED, _TIER_CRITICAL)
+        roll = rng.random()
+        # Layered: red band wins if roll lands in [0, tier_red);
+        # yellow band next if roll lands in [tier_red, tier_red +
+        # tier_yellow). Everything else (the majority) stays nominal.
+        if roll < tier_red:
+            health = rng.uniform(_TIER_CRITICAL, 1.00)
+        elif roll < tier_red + tier_yellow:
+            health = rng.uniform(_TIER_DEGRADED, _TIER_CRITICAL)
         return _cap_to_parent_tier(health, parent_health)
 
     def _build_node(

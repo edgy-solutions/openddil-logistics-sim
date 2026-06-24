@@ -19,7 +19,12 @@ import re
 import pytest
 
 from logistics_sim.config import FaceSpec, LayerSpec, SynthesisKnobs
-from logistics_sim.element_gen import AssetState, cardinality, generate_snapshot
+from logistics_sim.element_gen import (
+    AssetState,
+    SeverityTier,
+    cardinality,
+    generate_snapshot,
+)
 
 
 @pytest.fixture
@@ -47,9 +52,15 @@ def mrad_faces() -> tuple[FaceSpec, ...]:
 
 @pytest.fixture
 def synthesis() -> SynthesisKnobs:
+    # Mirrors config/default.yaml's per-tier matrix. The collapsed
+    # `degraded_fraction` is retained for back-compat tests; tier-aware
+    # tests reference the per-tier fields below directly.
     return SynthesisKnobs(
         health_nominal_min=0.55, health_nominal_max=0.85,
-        degraded_fraction=0.15,
+        degraded_yellow_fraction=0.15, degraded_red_fraction=0.00,
+        fault_yellow_fraction=0.20,    fault_red_fraction=0.05,
+        failed_yellow_fraction=0.30,   failed_red_fraction=0.20,
+        degraded_fraction=0.15,  # legacy fallback
         temp_min=30, temp_max=75,
         load_min=5, load_max=95,
         tick_drift_temp=1.5, tick_drift_load=5.0,
@@ -425,3 +436,320 @@ def test_default_tx_rx_true_when_unspecified():
     s = AssetState(platform_variant="MRAD2_radar")
     assert s.actively_transmitting is True
     assert s.actively_receiving is True
+
+
+# -----------------------------------------------------------------------------
+# severity_tier() — per-state mapping (2026-06-24 demo prep)
+# -----------------------------------------------------------------------------
+# Locks in the upstream-state → SeverityTier mapping the maintainer
+# 3D view depends on for tile-color narrative consistency:
+#   * Proprietary sim reports OK  → tiles all green
+#   * Proprietary sim reports DEGRADED → some yellow, no red
+#   * Proprietary sim reports FAULT → mostly yellow, a few red
+#   * Proprietary sim reports FAILED → heavier mix of yellow + red
+#   * Power off / shutting down → FAILED tier (asset down)
+#   * Power maintenance → DEGRADED tier (minor visual)
+#   * tx_off AND rx_off (state mismatch) → FAULT
+def test_severity_tier_NOMINAL_for_healthy_asset():
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+
+
+def test_severity_tier_NOMINAL_for_unspecified_state():
+    """UNSPECIFIED is treated as healthy -- no badness signal, no
+    visual degradation. Customer feeds that don't populate
+    OperationalState fall here."""
+    s = AssetState(platform_variant="MRAD2_radar")
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+
+
+def test_severity_tier_FAILED_when_health_FAILED():
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAILED",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+
+
+def test_severity_tier_FAILED_when_power_OFF():
+    """Power off OUTRANKS NOMINAL health -- an asset that's off is
+    visually failed regardless of its last-reported health."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_OFF",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+
+
+def test_severity_tier_FAILED_when_power_SHUTTING_DOWN():
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_SHUTTING_DOWN",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+
+
+def test_severity_tier_FAULT_when_health_FAULT():
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAULT",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
+
+
+def test_severity_tier_FAULT_when_tx_rx_both_off_with_nominal_health():
+    """Claimed ON + nominal health but tx+rx both off -- the state-
+    mismatch case. Visually reads as FAULT (operator sees red on a
+    subset, prompting investigation)."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_NOMINAL",
+        actively_transmitting=False,
+        actively_receiving=False,
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
+
+
+def test_severity_tier_DEGRADED_when_health_DEGRADED():
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_DEGRADED",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.DEGRADED
+
+
+def test_severity_tier_DEGRADED_when_power_MAINTENANCE():
+    """MAINTENANCE is a power state, not health -- but it reads as a
+    minor visual signal (planned downtime, not a failure)."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_MAINTENANCE",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.DEGRADED
+
+
+def test_severity_tier_FAILED_outranks_FAULT_outranks_DEGRADED():
+    """Priority: FAILED > FAULT > DEGRADED. A customer feed reporting
+    HEALTH_STATE_FAILED with POWER_STATE_MAINTENANCE resolves to
+    FAILED -- the worst signal wins."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_MAINTENANCE",
+        health_state="HEALTH_STATE_FAILED",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+
+
+# -----------------------------------------------------------------------------
+# Per-tier synthesis output (the user-visible behavior)
+# -----------------------------------------------------------------------------
+def _state_for_tier(tier: SeverityTier) -> AssetState:
+    """Build an AssetState that resolves to the requested tier."""
+    if tier is SeverityTier.NOMINAL:
+        return AssetState(
+            platform_variant="MRAD2_radar",
+            power_state="POWER_STATE_ON",
+            health_state="HEALTH_STATE_NOMINAL",
+        )
+    if tier is SeverityTier.DEGRADED:
+        return AssetState(
+            platform_variant="MRAD2_radar",
+            power_state="POWER_STATE_ON",
+            health_state="HEALTH_STATE_DEGRADED",
+        )
+    if tier is SeverityTier.FAULT:
+        return AssetState(
+            platform_variant="MRAD2_radar",
+            power_state="POWER_STATE_ON",
+            health_state="HEALTH_STATE_FAULT",
+        )
+    return AssetState(  # FAILED
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_FAILED",
+    )
+
+
+def _bucket_counts(snap):
+    """Count elements in (red >0.97), (yellow >0.90 ≤0.97), (nominal ≤0.90)
+    buckets. Thresholds match the frontend's getStatusFromHealth."""
+    red = sum(1 for e in snap if e.health > 0.97)
+    yellow = sum(1 for e in snap if 0.90 < e.health <= 0.97)
+    nominal = sum(1 for e in snap if e.health <= 0.90)
+    return red, yellow, nominal
+
+
+def test_NOMINAL_asset_has_zero_yellow_or_red_elements(mrad_layers, mrad_faces, synthesis):
+    """User-stated requirement (2026-06-24 demo prep): "If the
+    proprietary sim says it's OK then we should have all the tiles
+    ok." A NOMINAL asset MUST NOT show any yellow or red tiles."""
+    snap = generate_snapshot(
+        "asset-nom", _state_for_tier(SeverityTier.NOMINAL),
+        mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    red, yellow, nominal = _bucket_counts(snap)
+    assert red == 0,    f"NOMINAL asset must have 0 red tiles, got {red}"
+    assert yellow == 0, f"NOMINAL asset must have 0 yellow tiles, got {yellow}"
+    assert nominal == len(snap)
+
+
+def test_DEGRADED_asset_has_yellow_but_no_red(mrad_layers, mrad_faces, synthesis):
+    """User-stated requirement: "If it's degraded then we can have
+    some yellow." DEGRADED tier produces yellow tiles ONLY -- no red.
+    The user specifically distinguished DEGRADED ("yellow only") from
+    FAILED ("reds with yellows")."""
+    snap = generate_snapshot(
+        "asset-deg", _state_for_tier(SeverityTier.DEGRADED),
+        mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    red, yellow, _ = _bucket_counts(snap)
+    assert yellow > 0,  f"DEGRADED asset must have SOME yellow tiles, got {yellow}"
+    assert red == 0,    f"DEGRADED asset must have ZERO red tiles, got {red}"
+
+
+def test_FAILED_asset_has_both_yellow_and_red(mrad_layers, mrad_faces, synthesis):
+    """User-stated requirement: "If it's failed then reds are ok with
+    yellows." FAILED tier produces BOTH yellow AND red tiles."""
+    snap = generate_snapshot(
+        "asset-fld", _state_for_tier(SeverityTier.FAILED),
+        mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    red, yellow, _ = _bucket_counts(snap)
+    assert yellow > 0, f"FAILED asset must have yellow tiles, got {yellow}"
+    assert red > 0,    f"FAILED asset must have red tiles, got {red}"
+
+
+def test_FAULT_asset_has_yellow_and_some_red(mrad_layers, mrad_faces, synthesis):
+    """FAULT sits between DEGRADED and FAILED -- has yellow + some
+    red, but typically less of both than FAILED. Locks in the
+    intermediate tier so DEGRADED vs FAULT vs FAILED produces three
+    visually distinct mixes."""
+    snap = generate_snapshot(
+        "asset-flt", _state_for_tier(SeverityTier.FAULT),
+        mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    red, yellow, _ = _bucket_counts(snap)
+    assert yellow > 0, f"FAULT asset must have yellow tiles, got {yellow}"
+    assert red > 0,    f"FAULT asset must have some red tiles, got {red}"
+
+
+def test_tier_red_count_monotone_increasing_DEGRADED_FAULT_FAILED(mrad_layers, mrad_faces, synthesis):
+    """The visual narrative requires red counts to grow as severity
+    rises: 0 reds at DEGRADED < some reds at FAULT < more reds at
+    FAILED. Same asset_id across all three so RNG seed parity is
+    preserved -- only the tier changes, which is exactly what
+    happens when an operator watches an asset deteriorate live."""
+    counts = {}
+    for tier in (SeverityTier.DEGRADED, SeverityTier.FAULT, SeverityTier.FAILED):
+        snap = generate_snapshot(
+            "asset-mono", _state_for_tier(tier),
+            mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+            degraded_power_states=DEGRADED_POWER,
+            degraded_health_states=DEGRADED_HEALTH,
+        )
+        red, _, _ = _bucket_counts(snap)
+        counts[tier] = red
+    assert counts[SeverityTier.DEGRADED] == 0, \
+        "DEGRADED must have zero reds"
+    assert counts[SeverityTier.FAILED] > counts[SeverityTier.FAULT] > 0, \
+        f"FAILED ({counts[SeverityTier.FAILED]}) > FAULT ({counts[SeverityTier.FAULT]}) > 0"
+
+
+def test_per_tier_face_lift_fraction_approximately_matches_config(mrad_layers, mrad_faces, synthesis):
+    """The fraction of FACE elements lifted should approximate the
+    configured (yellow + red) fraction within RNG tolerance. Confirms
+    the per-tier knobs actually drive the lift rate, not just the
+    overall non-NOMINAL classification."""
+    expected = {
+        SeverityTier.DEGRADED: synthesis.degraded_yellow_fraction + synthesis.degraded_red_fraction,
+        SeverityTier.FAULT:    synthesis.fault_yellow_fraction    + synthesis.fault_red_fraction,
+        SeverityTier.FAILED:   synthesis.failed_yellow_fraction   + synthesis.failed_red_fraction,
+    }
+    for tier, expected_frac in expected.items():
+        snap = generate_snapshot(
+            "asset-frac-" + tier.value, _state_for_tier(tier),
+            mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+            degraded_power_states=DEGRADED_POWER,
+            degraded_health_states=DEGRADED_HEALTH,
+        )
+        face = [e for e in snap if e.layer_depth == 0]
+        lifted = sum(1 for e in face if e.health > 0.90)
+        actual_frac = lifted / len(face) if face else 0
+        # 48 face elements / face × small samples → wide RNG band.
+        # Within ±15 percentage points is a fair sanity check.
+        assert abs(actual_frac - expected_frac) < 0.15, (
+            f"{tier.value}: expected face lift ~{expected_frac:.0%}, got "
+            f"{actual_frac:.0%} ({lifted}/{len(face)})"
+        )
+
+
+def test_tier_change_alters_some_elements_keeps_others(mrad_layers, mrad_faces, synthesis):
+    """Bridging the demo narrative: when an asset's tier escalates
+    (DEGRADED → FAULT, FAULT → FAILED), SOME elements flip to a more
+    severe color but most stay where they were. RNG seed parity per
+    element ensures the SAME elements consistently elevate at each
+    tier -- demo-stability still holds."""
+    asset = "asset-evolve"
+    snaps = {}
+    for tier in (SeverityTier.NOMINAL, SeverityTier.DEGRADED, SeverityTier.FAULT, SeverityTier.FAILED):
+        snaps[tier] = generate_snapshot(
+            asset, _state_for_tier(tier),
+            mrad_layers, mrad_faces, synthesis, tick_bucket=0,
+            degraded_power_states=DEGRADED_POWER,
+            degraded_health_states=DEGRADED_HEALTH,
+        )
+    # Going NOMINAL → DEGRADED, some elements should change (the
+    # lifted ones); most stay the same.
+    nom_by_id = {e.element_id: e.health for e in snaps[SeverityTier.NOMINAL]}
+    deg_by_id = {e.element_id: e.health for e in snaps[SeverityTier.DEGRADED]}
+    diff = sum(1 for k in nom_by_id if nom_by_id[k] != deg_by_id[k])
+    same = sum(1 for k in nom_by_id if nom_by_id[k] == deg_by_id[k])
+    assert diff > 0, "tier escalation must change some elements"
+    assert same > 0, "tier escalation must NOT change every element (demo stability)"
+
+
+def test_back_compat_is_degraded_still_works():
+    """The is_degraded() wrapper preserves the old boolean contract
+    so main.py's tick-loop degraded_count tally + publisher's
+    `degraded` envelope field keep working. Anything other than the
+    NOMINAL tier returns True."""
+    nominal = AssetState(
+        platform_variant="X",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    assert nominal.is_degraded(DEGRADED_POWER, DEGRADED_HEALTH) is False
+
+    for state in [
+        AssetState(platform_variant="X", power_state="POWER_STATE_ON",
+                   health_state="HEALTH_STATE_DEGRADED"),
+        AssetState(platform_variant="X", power_state="POWER_STATE_ON",
+                   health_state="HEALTH_STATE_FAULT"),
+        AssetState(platform_variant="X", power_state="POWER_STATE_ON",
+                   health_state="HEALTH_STATE_FAILED"),
+        AssetState(platform_variant="X", power_state="POWER_STATE_OFF",
+                   health_state="HEALTH_STATE_NOMINAL"),
+        AssetState(platform_variant="X", power_state="POWER_STATE_MAINTENANCE",
+                   health_state="HEALTH_STATE_NOMINAL"),
+    ]:
+        assert state.is_degraded(DEGRADED_POWER, DEGRADED_HEALTH) is True, \
+            f"is_degraded must be True for {state}"

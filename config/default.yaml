@@ -85,7 +85,37 @@ asset_profiles:
     synthesis:
       health_nominal_min: 0.55
       health_nominal_max: 0.85
+
+      # Per-tier yellow/red fractions of FACE elements that lift into
+      # the >0.90 (yellow) and >0.97 (red) health bands. Subtree
+      # children inherit via the rollup cap, so an elevated face cell's
+      # 64 descendants share its tier visually. Mapping from upstream
+      # asset state to tier:
+      #
+      #   NOMINAL  (health NOMINAL + power ON)                → no lift
+      #   DEGRADED (health DEGRADED, or power MAINTENANCE)    → yellow only
+      #   FAULT    (health FAULT, or tx+rx both off)          → yellow + small red
+      #   FAILED   (health FAILED, or power OFF/SHUTTING_DOWN)→ heavier mix
+      #
+      # Tuned so the demo narrative reads cleanly:
+      #   * NOMINAL asset → operator sees an all-green array
+      #   * DEGRADED → "a few minor faults, still operational"
+      #   * FAULT → "real problems, mission-impacted"
+      #   * FAILED → "asset is down, half the array is bad"
+      degraded_yellow_fraction: 0.15
+      degraded_red_fraction:    0.00
+      fault_yellow_fraction:    0.20
+      fault_red_fraction:       0.05
+      failed_yellow_fraction:   0.30
+      failed_red_fraction:      0.20
+
+      # Legacy single-fraction knob -- kept so older configs still
+      # load. New deployments should use the per-tier fields above;
+      # this fallback is only honored when NONE of the tier_*_fraction
+      # fields are set (loader collapses across tiers in that case,
+      # matching pre-2026-06-24 behavior).
       degraded_fraction: 0.15
+
       temp_min: 30
       temp_max: 75
       load_min: 5
