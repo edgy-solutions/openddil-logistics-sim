@@ -49,32 +49,39 @@ asset_profiles:
     # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
     # only resolve when both sides agree on the grid. Tree cardinality
     # history:
-    #   23,712 (96 × 6×4×9) — 5MB serialized, WebGL DOA on integrated GPU
-    #    8,160 (96 × 4×4×4) — 1.6MB,         WebGL still died on switch
-    #    4,080 (48 × 4×4×4) — 0.8MB,         current — face shrunk to 6×8
-    # Face shrunk + frameloop=demand on the Canvas together (see
-    # SensorArrayView.tsx) bring per-frame GPU work low enough for
-    # Intel UHD-class hardware to hold the WebGL context across
-    # asset switches.
+    #   23,712 (96 × 6×4×9) — 5MB serialized, current. Restored after
+    #                          a visual quality pass -- the trimmed-
+    #                          down 4,080 tree looked sparse compared
+    #                          to the original dense grid + pulse
+    #                          animation.
+    #    8,160 (96 × 4×4×4) — 1.6MB, intermediate trim.
+    #    4,080 (48 × 4×4×4) — 0.8MB, deepest trim. WebGL holds context
+    #                          on Intel UHD-class hardware with this
+    #                          plus frameloop=demand. Use this if the
+    #                          target deployment has integrated-GPU
+    #                          clients that can't hold context.
+    # Topic asset-element-telemetry needs max.message.bytes=16MB
+    # (see openddil-helm infrastructure.yaml + flush-assets.sh
+    # TOPIC_SPECS) to admit the 5MB serialized snapshot at 23,712.
     layers:
       - name: RADAR UNIT
         prefix: TR
       - name: BACKPLANE
         prefix: BOARD
         cols: 2
-        rows: 2
+        rows: 3
       - name: PROCESSOR BANK
         prefix: MODULE
         cols: 2
         rows: 2
       - name: GAN MMIC CHIP
         prefix: CHIP
-        cols: 2
-        rows: 2
+        cols: 3
+        rows: 3
     faces:
       - name: PRIMARY APERTURE
-        cols: 6
-        rows: 8
+        cols: 8
+        rows: 12
     synthesis:
       health_nominal_min: 0.55
       health_nominal_max: 0.85
