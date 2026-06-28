@@ -3,8 +3,17 @@ name: Docker Build
 on:
   push:
     branches: [ "master" ]
+    # Also fire on annotated tags (v1.0.0, v1.1.0, ...) so a release
+    # cut publishes a versioned image (:v1.0.0) alongside :latest.
+    # values-pinned.yaml + the mirror script can then resolve the tag
+    # to a fixed digest for reproducible deploys.
+    tags: [ "v*" ]
   pull_request:
     branches: [ "master" ]
+  # Manual trigger for re-running a build without a code change (e.g.
+  # registry hiccup, or wanting to re-publish :latest at the current
+  # HEAD).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,10 +42,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Always publish :latest. On a v* tag push, ALSO publish the
+      # tag-versioned image (e.g. :v1.0.0) so downstream consumers can
+      # pin to a specific release.
+      - name: Compute image tags
+        id: tags
+        run: |
+          REG=ghcr.io/${{ github.repository_owner }}/openddil/logistics-sim
+          T="$REG:latest"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            T="$T,$REG:${{ github.ref_name }}"
+          fi
+          echo "tags=$T" >> "$GITHUB_OUTPUT"
+
       - name: Build logistics-sim
         uses: docker/build-push-action@v4
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/openddil/logistics-sim:latest
+          tags: ${{ steps.tags.outputs.tags }}
