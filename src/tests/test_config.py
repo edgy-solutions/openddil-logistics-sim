@@ -112,3 +112,66 @@ def test_loader_partial_per_tier_uses_defaults_for_unset(tmp_path: Path) -> None
     assert s.fault_yellow_fraction    == 0.20
     assert s.fault_red_fraction       == 0.05
     assert s.failed_yellow_fraction   == 0.30
+
+
+def _write_profile_with_suffix(
+    tmp_path: Path, suffix: str | None,
+) -> Path:
+    """Build a minimal config with the given match_asset_id_suffix
+    on the single profile. None -> field absent from YAML."""
+    lines = [
+        "tick_interval_s: 30",
+        "output_topic: asset-element-telemetry",
+        "asset_profiles:",
+        "  - name: mrad",
+        '    matches_platform_variants: ["MRAD_Sensor"]',
+    ]
+    if suffix is not None:
+        lines.append(f'    match_asset_id_suffix: "{suffix}"')
+    lines += [
+        "    layers:",
+        "      - name: RADAR UNIT",
+        "        prefix: TR",
+        "    faces:",
+        "      - name: PRIMARY APERTURE",
+        "        cols: 1",
+        "        rows: 1",
+        "    synthesis:",
+        "      health_nominal_min: 0.55",
+        "      health_nominal_max: 0.85",
+        "      degraded_fraction: 0.15",
+    ]
+    f = tmp_path / "suffix_config.yaml"
+    f.write_text("\n".join(lines) + "\n")
+    return f
+
+
+def test_match_asset_id_suffix_loaded_when_present(tmp_path: Path) -> None:
+    yaml = _write_profile_with_suffix(tmp_path, "_Sensor")
+    cfg = SimConfig.load(yaml)
+    assert cfg.profiles[0].match_asset_id_suffix == "_Sensor"
+
+
+def test_match_asset_id_suffix_defaults_to_empty_when_absent(tmp_path: Path) -> None:
+    """No `match_asset_id_suffix:` line in YAML -> empty string ->
+    suffix filter disabled in discovery (variant-only matching).
+    Preserves the pre-2026-06-29 behavior for old configs."""
+    yaml = _write_profile_with_suffix(tmp_path, None)
+    cfg = SimConfig.load(yaml)
+    assert cfg.profiles[0].match_asset_id_suffix == ""
+
+
+def test_variant_suffix_map_emits_per_variant_suffix(tmp_path: Path) -> None:
+    """SimConfig.variant_suffix_map keys = union of every profile's
+    matches list; values = that profile's match_asset_id_suffix."""
+    yaml = _write_profile_with_suffix(tmp_path, "_Sensor")
+    cfg = SimConfig.load(yaml)
+    assert cfg.variant_suffix_map == {"MRAD_Sensor": "_Sensor"}
+
+
+def test_variant_suffix_map_empty_when_no_suffix_configured(tmp_path: Path) -> None:
+    """No suffix configured -> map value is empty string for that
+    variant -> discovery treats the entry as "no filter."""
+    yaml = _write_profile_with_suffix(tmp_path, None)
+    cfg = SimConfig.load(yaml)
+    assert cfg.variant_suffix_map == {"MRAD_Sensor": ""}

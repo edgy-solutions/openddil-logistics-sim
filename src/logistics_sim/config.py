@@ -95,6 +95,25 @@ class AssetProfile:
     faces: tuple[FaceSpec, ...]
     synthesis: SynthesisKnobs
 
+    # Optional asset_id-suffix filter applied AFTER platform_variant
+    # matching. Lets a profile match a variant that's used by multiple
+    # asset KINDS in the customer wire model but apply only to the
+    # right one. Specific case (2026-06-29): after the per-site sensor
+    # identity fix in the customer-bundle Bloblang, both per-site
+    # SENSORS (asset_id ends in `_Sensor`) and per-site RADAR CHASSIS
+    # (asset_id ends in `_radar`) carry platform_variant=MRAD_Sensor
+    # (the chassis via alias). Only the sensor has the multi-array
+    # subsystem the MRAD profile synthesizes for. With
+    # match_asset_id_suffix=`_Sensor`, the chassis falls out of
+    # discovery -- no wasted Kafka traffic, no wasted postgres rows,
+    # no element telemetry for assets without arrays.
+    #
+    # Empty string (or absent in YAML) disables the filter -- the
+    # profile then matches purely on platform_variant, preserving the
+    # pre-2026-06-29 behavior for profiles that don't have the
+    # variant-shared-across-kinds problem.
+    match_asset_id_suffix: str = ""
+
 
 @dataclasses.dataclass(frozen=True)
 class SimConfig:
@@ -190,6 +209,24 @@ class SimConfig:
             out.update(p.matches_platform_variants)
         return frozenset(out)
 
+    @property
+    def variant_suffix_map(self) -> dict[str, str]:
+        """Per-variant asset_id suffix filter (from AssetProfile.
+        match_asset_id_suffix). Empty string means "no filter -- match
+        any asset_id with that variant."
+
+        The set of keys is identical to all_matched_variants; discovery
+        uses this to apply the suffix filter on each message after the
+        cheap variant pre-check passes. Multiple profiles can share a
+        variant in principle; in that case the last profile in the
+        config wins (degenerate but harmless -- maintain that the
+        config author avoids the collision)."""
+        out: dict[str, str] = {}
+        for p in self.profiles:
+            for v in p.matches_platform_variants:
+                out[v] = p.match_asset_id_suffix
+        return out
+
 
 def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
     layers = tuple(
@@ -266,6 +303,7 @@ def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
         layers=layers,
         faces=faces,
         synthesis=synthesis,
+        match_asset_id_suffix=str(raw.get("match_asset_id_suffix", "")),
     )
 
 

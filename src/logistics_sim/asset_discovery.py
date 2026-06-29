@@ -196,6 +196,7 @@ async def run_edge_discovery(
     matched_variants: Iterable[str],
     roster: AssetRoster,
     variant_canonical_map: Mapping[str, str] | None = None,
+    variant_suffix_map: Mapping[str, str] | None = None,
 ) -> None:
     """One coroutine per edge cluster. Updates the per-asset
     AssetState every time a record arrives -- including the tx/rx
@@ -208,9 +209,20 @@ async def run_edge_discovery(
     (the standard cluster setup); harmless when empty (the wire is
     already canonical, every variant looks up to itself).
     Loaded from `platform_variant_aliases.yaml` by main.py.
+
+    `variant_suffix_map` carries the per-profile asset_id-suffix
+    filter (AssetProfile.match_asset_id_suffix). When the entry for
+    the resolved canonical variant is non-empty, the asset_id MUST
+    end with that suffix or the message is skipped. Lets a profile
+    target one KIND of asset when multiple kinds share a variant
+    (e.g. MRAD: per-site SENSOR `*_Sensor` keeps the multi-array
+    profile, per-site RADAR CHASSIS `*_radar` falls out -- both
+    carry variant=MRAD_Sensor after aliasing but only the sensor
+    has the array subsystem the profile synthesizes for).
     """
     variants = frozenset(matched_variants)
     canonical_map = variant_canonical_map or {}
+    suffix_map = variant_suffix_map or {}
     consumer = AIOKafkaConsumer(
         input_topic,
         bootstrap_servers=brokers,
@@ -221,8 +233,10 @@ async def run_edge_discovery(
     await consumer.start()
     log.info(
         "[%s] discovery consumer started (brokers=%s topic=%s group=%s "
-        "aliases=%d)",
-        edge_id, brokers, input_topic, consumer_group, len(canonical_map),
+        "aliases=%d suffix_filters=%d)",
+        edge_id, brokers, input_topic, consumer_group,
+        len(canonical_map),
+        sum(1 for s in suffix_map.values() if s),
     )
     try:
         async for msg in consumer:
@@ -235,6 +249,12 @@ async def run_edge_discovery(
             # is already canonical (alias file may not be mounted).
             canonical = canonical_map.get(native_variant, native_variant)
             if canonical not in variants:
+                continue
+            # Per-profile asset_id-suffix filter -- applied AFTER the
+            # variant check. Empty suffix string disables the filter
+            # for that variant (legacy single-kind-per-variant case).
+            required_suffix = suffix_map.get(canonical, "")
+            if required_suffix and not asset_id.endswith(required_suffix):
                 continue
             # Downstream (tick loop -> profile_for_variant) matches
             # against canonical too, so rewrite the AssetState's

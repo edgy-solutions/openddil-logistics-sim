@@ -38,12 +38,35 @@ degraded_health_states:
 asset_profiles:
   # ---- MRAD --------------------------------------------------------------
   # Single-face Multi-Mission Radar. Layout mirrors frontend MRAD_CONFIG.
+  # The MRAD profile models the SENSOR subsystem -- the multi-element
+  # array inside an MRAD radar. After the 2026-06-24 per-site sensor
+  # identity fix in the customer-bundle Bloblang, a single radar site
+  # produces TWO OpenDDIL assets:
+  #   * `prop:..._radar` (the chassis Unit, variant=MRAD_Sensor via
+  #     alias from MRAD_Radar)
+  #   * `prop:..._radar_MRAD_Sensor` (the sensor subsystem, variant=
+  #     MRAD_Sensor natively)
+  # Only the SENSOR has the array. The chassis is a platform that
+  # carries the sensor but has no per-element subsystem of its own.
+  # `match_asset_id_suffix: _Sensor` keeps the chassis (and any other
+  # variant=MRAD_Sensor asset without the suffix) out of discovery,
+  # so the sim doesn't waste cycles synthesizing per-element trees
+  # for things that don't have arrays. The frontend's DiagnosticCanvas
+  # applies the same gate for the multi-array 3D view (only routes
+  # to SensorArrayView when assetId.endsWith('_Sensor')).
+  #
+  # MRAD_Interceptor (launchers) intentionally absent from matches --
+  # launchers are kinetic effectors, not sensor subsystems, no array
+  # to synthesize for. They render via SCHEMATIC_REGISTRY's
+  # ArtillerySchematic in the maintainer 3D view; their TelemetryCharts
+  # panel falls back to the empty state (truthful: no sustainment, no
+  # synthesizable subsystem).
   - name: mrad
     matches_platform_variants:
       - MRAD_Sensor
-      - MRAD_Radar
-      - MRAD_Interceptor
+      - MRAD_Radar    # aliases to MRAD_Sensor at ingress; kept for safety
       - MRAD2_radar   # customer-overlay specific variant token
+    match_asset_id_suffix: "_Sensor"
     # IMPORTANT: cols×rows MUST match the frontend's MRAD_CONFIG.layers
     # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
     # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)
