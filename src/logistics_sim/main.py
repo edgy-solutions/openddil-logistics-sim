@@ -38,6 +38,9 @@ async def _tick_loop(
              [p.name for p in cfg.profiles],
              per_profile_card)
 
+    # First tick is always cadence-driven (loop start, no prior wake event).
+    tick_trigger = "cadence"
+
     while True:
         try:
             tick_bucket = int(_clock() // cfg.tick_interval_s)
@@ -105,15 +108,37 @@ async def _tick_loop(
                 published += 1
             if published:
                 log.info(
-                    "tick %d: published %d snapshot(s) (%d degraded honoring upstream state)",
-                    tick_bucket, published, degraded_count,
+                    "tick %d: published %d snapshot(s) (%d degraded honoring upstream state) trigger=%s",
+                    tick_bucket, published, degraded_count, tick_trigger,
                 )
         except asyncio.CancelledError:
             log.info("tick loop cancelled")
             raise
         except Exception:
             log.exception("tick loop iteration failed; will retry next interval")
-        await asyncio.sleep(cfg.tick_interval_s)
+
+        # Event-driven cadence: wake up after at most tick_interval_s,
+        # OR as soon as discovery signals a tier-relevant state change
+        # (power_state / health_state / actively_transmitting /
+        # actively_receiving) on any rostered asset. The customer-
+        # side flip then surfaces on the maintainer view within ~1s
+        # instead of waiting up to one full cadence cycle (~30s+, or
+        # worse when per-asset publish cost stretches the cycle past
+        # tick_interval_s).
+        #
+        # asyncio.Event coalesces bursts: 10 simultaneous state
+        # changes fire the event once, the tick runs once with the
+        # roster's current state (all 10 changes reflected), then
+        # the event is cleared and the next wait begins.
+        roster.changed_event.clear()
+        try:
+            await asyncio.wait_for(
+                roster.changed_event.wait(),
+                timeout=cfg.tick_interval_s,
+            )
+            tick_trigger = "state_change"
+        except asyncio.TimeoutError:
+            tick_trigger = "cadence"
 
 
 def _clock() -> float:

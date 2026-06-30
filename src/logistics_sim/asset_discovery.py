@@ -52,16 +52,70 @@ _HEALTH_STATE_NAME = {
 
 class AssetRoster:
     """Asset_id -> AssetState. Thread-safety: single asyncio loop,
-    methods complete atomically -- no lock needed."""
+    methods complete atomically -- no lock needed.
+
+    2026-06-30: holds an asyncio.Event ("changed") that fires when an
+    upsert lands a TIER-RELEVANT field change (power_state, health_state,
+    actively_transmitting, actively_receiving) or a new asset. The
+    tick loop races sleep(tick_interval_s) against this event so a
+    customer-side state flip surfaces on the maintainer view within
+    ~1s instead of waiting up to one full tick cycle (~30s, or worse
+    when per-asset publish cost pushes the effective cycle beyond
+    tick_interval_s). Bulk-change bursts coalesce naturally -- an
+    Event set N times is the same as set once.
+
+    The event is created lazily on first access so unit tests that
+    construct AssetRoster outside an asyncio context still work.
+    """
+
+    # Fields that affect element_gen.severity_tier / generate_snapshot
+    # output. A change in any of these means the next tick should
+    # produce a visibly-different per-element tree, so it's worth
+    # waking the tick loop early. Other AssetState fields (e.g.
+    # platform_variant) don't influence the per-element synthesis,
+    # so we don't fire on those.
+    _TIER_RELEVANT_FIELDS: tuple[str, ...] = (
+        "power_state",
+        "health_state",
+        "actively_transmitting",
+        "actively_receiving",
+    )
 
     def __init__(self) -> None:
         self._assets: dict[str, AssetState] = {}
+        self._changed_event: asyncio.Event | None = None
+
+    @property
+    def changed_event(self) -> asyncio.Event:
+        """Lazily-created event. Tests that only call .upsert()/.snapshot()
+        won't hit asyncio.Event() construction (which is loop-bound on
+        older Pythons and would fail outside a running loop)."""
+        if self._changed_event is None:
+            self._changed_event = asyncio.Event()
+        return self._changed_event
+
+    def _is_tier_change(self, old: AssetState, new: AssetState) -> bool:
+        for f in self._TIER_RELEVANT_FIELDS:
+            if getattr(old, f, None) != getattr(new, f, None):
+                return True
+        return False
 
     def upsert(self, asset_id: str, state: AssetState) -> bool:
         """Returns True iff this is a NEW asset (first sight). Used by
-        discovery to log discoveries without spamming on every tick."""
-        is_new = asset_id not in self._assets
+        discovery to log discoveries without spamming on every tick.
+
+        Also: when this upsert lands a tier-relevant change (or this
+        is a new asset), signal `changed_event` so the tick loop can
+        wake early. The event is created lazily on first access; in
+        the rare case it doesn't exist yet (no tick loop ever called
+        .changed_event), upserts are silent -- correct since there's
+        no waiter to signal."""
+        prev = self._assets.get(asset_id)
+        is_new = prev is None
         self._assets[asset_id] = state
+        if self._changed_event is not None:
+            if is_new or self._is_tier_change(prev, state):
+                self._changed_event.set()
         return is_new
 
     def snapshot(self) -> dict[str, AssetState]:
