@@ -85,6 +85,23 @@ async def _tick_loop(
                     core_temp_c=core_temp_c,
                     uptime_hours=uptime_hours,
                 )
+                # Per-layer inventory aggregate (asset-element-inventory).
+                # Same per-element signal, rolled up to a "spares
+                # consumed" count per layer so the maintainer view's
+                # Inventory card tracks the same DEGRADED/FAULT/FAILED
+                # tile flips as the 3D drill-down. Non-fatal -- a
+                # failure here doesn't stop the per-element publish.
+                try:
+                    await producer.publish_inventory(
+                        asset_id=asset_id,
+                        asset_state=asset_state,
+                        elements=elements,
+                    )
+                except Exception:
+                    log.exception(
+                        "inventory publish failed for %s; element snapshot still emitted",
+                        asset_id,
+                    )
                 published += 1
             if published:
                 log.info(
