@@ -70,6 +70,18 @@ class SeverityTier(enum.Enum):
     DEGRADED = "DEGRADED"
     FAULT = "FAULT"
     FAILED = "FAILED"
+    # POWER_OFF is its own tier, DISTINCT from FAILED. A powered-off
+    # asset isn't broken -- it's just not running. Synthesizing red
+    # tiles for a powered-off array would tell the operator the
+    # hardware is degraded when it's actually fine and turned off.
+    # Instead: POWER_OFF -> nominal element health + tx/rx off across
+    # the whole tree, so the frontend can render the array as OFF
+    # rather than as FAILED. The asset's Logistics Status still
+    # correctly reads CRITICAL (fusion classifies OFF as
+    # operationally critical), the CM card reads OFF, the Ground
+    # Diagnostics card reads OFF -- only the per-element view was
+    # lying, saying the hardware was degraded.
+    POWER_OFF = "POWER_OFF"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,8 +104,8 @@ class AssetState:
         """Resolve the synthesis severity tier. Mapping (in priority
         order, first matching rule wins):
 
-          1. health_state == HEALTH_STATE_FAILED               → FAILED
-          2. power_state in (POWER_OFF, SHUTTING_DOWN)         → FAILED
+          1. power_state in (POWER_OFF, SHUTTING_DOWN)         → POWER_OFF
+          2. health_state == HEALTH_STATE_FAILED               → FAILED
           3. health_state == HEALTH_STATE_FAULT                → FAULT
           4. health_state == HEALTH_STATE_NOMINAL              → FAULT
              AND tx_off AND rx_off  (state mismatch: asset
@@ -102,6 +114,14 @@ class AssetState:
           5. health_state == HEALTH_STATE_DEGRADED             → DEGRADED
           6. power_state == POWER_STATE_MAINTENANCE            → DEGRADED
           7. anything else (NOMINAL, UNSPECIFIED, ON, ...)     → NOMINAL
+
+        POWER_OFF is deliberately checked FIRST -- a powered-off asset
+        whose feed says HEALTH_STATE_FAILED (e.g., because the sim
+        stops updating health when the asset shuts down) still
+        classifies as POWER_OFF rather than FAILED. Rationale: "off"
+        is a distinct operator concept from "failed"; conflating them
+        makes the array display report FAILED synthesis (red tiles)
+        for an asset that's really just switched off.
 
         Note on the tx/rx mismatch rule (#4): the rule REQUIRES a
         positive NOMINAL health signal before treating tx_off+rx_off
@@ -125,9 +145,10 @@ class AssetState:
         del degraded_power_states, degraded_health_states  # unused (see docstring)
         h = self.health_state
         p = self.power_state
-        if h == "HEALTH_STATE_FAILED":
-            return SeverityTier.FAILED
+        # POWER_OFF wins over everything else -- see docstring.
         if p in ("POWER_STATE_OFF", "POWER_STATE_SHUTTING_DOWN"):
+            return SeverityTier.POWER_OFF
+        if h == "HEALTH_STATE_FAILED":
             return SeverityTier.FAILED
         if h == "HEALTH_STATE_FAULT":
             return SeverityTier.FAULT
@@ -254,13 +275,29 @@ def generate_snapshot(
     asset_tx = asset_state.actively_transmitting
     asset_rx = asset_state.actively_receiving
 
+    # POWER_OFF override: an off asset isn't running its array, so no
+    # element is transmitting or receiving regardless of what the
+    # per-depth default says. Also forces the yellow/red synthesis
+    # fractions to zero -- a powered-off array isn't broken, it's
+    # just off. The synthesized element health values stay in the
+    # nominal band; the frontend uses the asset-level power_state
+    # signal (from the operational envelope) to render tiles in an
+    # OFF style rather than a degraded style. Rationale: the tile
+    # colors alone can't distinguish "everything nominal, nothing
+    # firing" from "asset OFF, nothing firing"; the asset-level
+    # signal is needed to disambiguate.
+    is_power_off = tier is SeverityTier.POWER_OFF
+    if is_power_off:
+        asset_tx = False
+        asset_rx = False
+
     # Per-tier (yellow, red) fractions. NOMINAL gets no lift; everything
     # else pulls from the SynthesisKnobs matrix populated from the
     # YAML config (or back-compat-synthesized from degraded_fraction).
     # The tuple semantic is (yellow_fraction, red_fraction) where
     # yellow == >0.90 health, red == >0.97 -- thresholds match the
     # frontend's getStatusFromHealth.
-    if tier is SeverityTier.NOMINAL:
+    if tier is SeverityTier.NOMINAL or tier is SeverityTier.POWER_OFF:
         tier_yellow, tier_red = 0.0, 0.0
     elif tier is SeverityTier.DEGRADED:
         tier_yellow = synthesis.degraded_yellow_fraction
@@ -311,9 +348,14 @@ def generate_snapshot(
         base_load = stable.uniform(synthesis.load_min, synthesis.load_max)
         load_pct = max(0.0, min(100.0, base_load + drift.gauss(0, synthesis.tick_drift_load)))
         # Face elements ARE the T/R modules — inherit asset-level tx/rx.
-        # Internal layers are support electronics — always both true.
-        tx_active = asset_tx if depth == 0 else True
-        rx_active = asset_rx if depth == 0 else True
+        # Internal layers are support electronics — always both true...
+        # EXCEPT when the asset is powered off, in which case every
+        # layer reads as tx/rx off. Nothing on a shut-down array is
+        # transmitting or receiving; leaving deep layers at "true"
+        # would falsely signal that support electronics were still
+        # active while the face was idle.
+        tx_active = asset_tx if (depth == 0 or is_power_off) else True
+        rx_active = asset_rx if (depth == 0 or is_power_off) else True
         out.append(ElementTelemetry(
             element_id=elem_id,
             layer_depth=depth,

@@ -476,24 +476,72 @@ def test_severity_tier_FAILED_when_health_FAILED():
     assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
 
 
-def test_severity_tier_FAILED_when_power_OFF():
-    """Power off OUTRANKS NOMINAL health -- an asset that's off is
-    visually failed regardless of its last-reported health."""
+def test_severity_tier_POWER_OFF_when_power_OFF():
+    """Power off resolves to its OWN tier (POWER_OFF), not FAILED --
+    a shut-down asset isn't broken, it's just not running. Priority
+    over every other rule so a stale HEALTH_STATE_FAILED report from
+    before shutdown doesn't downgrade to FAILED."""
     s = AssetState(
         platform_variant="MRAD2_radar",
         power_state="POWER_STATE_OFF",
         health_state="HEALTH_STATE_NOMINAL",
     )
-    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.POWER_OFF
 
 
-def test_severity_tier_FAILED_when_power_SHUTTING_DOWN():
+def test_severity_tier_POWER_OFF_when_power_SHUTTING_DOWN():
     s = AssetState(
         platform_variant="MRAD2_radar",
         power_state="POWER_STATE_SHUTTING_DOWN",
         health_state="HEALTH_STATE_NOMINAL",
     )
-    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAILED
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.POWER_OFF
+
+
+def test_severity_tier_POWER_OFF_beats_stale_health_FAILED():
+    """The classic "asset stopped emitting real telemetry but its last
+    known health was FAILED" edge case: POWER_OFF wins regardless. An
+    off asset shouldn't have a FAILED tier because the maintainer view
+    would then synthesize red tiles for hardware that's really just off."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_OFF",
+        health_state="HEALTH_STATE_FAILED",
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.POWER_OFF
+
+
+def test_generate_snapshot_POWER_OFF_gives_all_nominal_elements(
+    mrad_layers, mrad_faces, synthesis,
+):
+    """POWER_OFF synthesis produces no degraded (yellow/red) elements --
+    a shut-down array shouldn't lie about its hardware being broken. All
+    element health values must be in the nominal band (<=0.90). And
+    every element -- face AND internal layers -- must read as tx/rx
+    off. Deep layers don't get to say "still running" when the asset
+    above them is turned off."""
+    from logistics_sim.element_gen import generate_snapshot
+    off_state = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_OFF",
+        health_state="HEALTH_STATE_NOMINAL",
+    )
+    snap = generate_snapshot(
+        asset_id="test-asset",
+        asset_state=off_state,
+        layers=mrad_layers,
+        faces=mrad_faces,
+        synthesis=synthesis,
+        tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    for e in snap:
+        assert e.health <= 0.90, (
+            f"element {e.element_id} health={e.health} -- POWER_OFF should not produce degraded tiles"
+        )
+        assert e.tx_active is False, f"{e.element_id}: tx_active should be False for POWER_OFF"
+        assert e.rx_active is False, f"{e.element_id}: rx_active should be False for POWER_OFF"
 
 
 def test_severity_tier_FAULT_when_health_FAULT():
