@@ -69,6 +69,19 @@ log = logging.getLogger("logistics_sim.publisher")
 # move from the same signal -- when one fires, the other follows.
 _INVENTORY_DEGRADED_HEALTH_THRESHOLD = 0.90
 
+# Producer max_request_size AND the soft-warn threshold for per-asset
+# element snapshots. Must match the asset-element-telemetry topic's
+# broker-side max.message.bytes (see openddil-helm infrastructure.yaml
+# topic-init + the flush-assets.sh TOPIC_SPECS matrix). A per-asset
+# element tree can run several MB (96 face x 6 boards x 4 modules x 9
+# chips = 23,712 elements at ~170B each ~= 4MB); a larger profile can
+# exceed the default 1MB and even approach this ceiling. When a payload
+# crosses _SNAPSHOT_WARN_BYTES we log a warning BEFORE the hard failure
+# so the operator sees the oversized asset coming rather than only after
+# MessageSizeTooLargeError aborts the send.
+_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+_SNAPSHOT_WARN_BYTES = 12 * 1024 * 1024  # 75% of the ceiling
+
 
 class HqProducer:
     """Wraps AIOKafkaProducer with the per-asset envelope encoder.
@@ -96,8 +109,8 @@ class HqProducer:
             # boards × 4 modules × 9 chips = 23,712 elements at ~170B
             # each). Default 1MB max_request_size would reject it.
             # Topic-level max.message.bytes must match (see docker-
-            # compose redpanda-init).
-            max_request_size=16 * 1024 * 1024,
+            # compose redpanda-init / helm topic-init).
+            max_request_size=_MAX_MESSAGE_BYTES,
         )
         await self._producer.start()
         log.info(
@@ -147,6 +160,27 @@ class HqProducer:
             "elements": [dataclasses.asdict(e) for e in elements],
         }
         payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        size = len(payload)
+        # Surface the byte size so an oversized asset is diagnosable from
+        # logs alone: a warning here (payload big but under the ceiling)
+        # tells the operator WHICH asset is approaching the limit and by
+        # how much, distinguishing "topic max.message.bytes misconfigured"
+        # (payload only a few MB but the broker caps lower) from "profile
+        # genuinely too large" (payload near/over _MAX_MESSAGE_BYTES). The
+        # caller (main._tick_loop) catches MessageSizeTooLargeError and
+        # skips just this asset so the rest of the fleet still publishes.
+        if size >= _SNAPSHOT_WARN_BYTES:
+            log.warning(
+                "asset %s (variant=%s, %d elements) snapshot is %.1f MB "
+                "(ceiling %.0f MB) -- approaching/over the Kafka message "
+                "limit. Verify topic max.message.bytes and consider reducing "
+                "this profile's element depth.",
+                asset_id, asset_state.platform_variant, len(elements),
+                size / (1024 * 1024), _MAX_MESSAGE_BYTES / (1024 * 1024),
+            )
+        else:
+            log.debug("asset %s snapshot payload=%d bytes (%d elements)",
+                      asset_id, size, len(elements))
         await self._producer.send_and_wait(
             self._topic, value=payload, key=asset_id.encode("utf-8"),
         )

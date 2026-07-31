@@ -17,6 +17,8 @@ import os
 import signal
 import sys
 
+from aiokafka.errors import MessageSizeTooLargeError
+
 from .aliases import load_variant_aliases
 from .asset_discovery import AssetRoster, run_edge_discovery
 from .config import SimConfig
@@ -79,15 +81,43 @@ async def _tick_loop(
                 # a tick; uptime advances 1 hour per ~120 ticks so the
                 # maintainer UI shows monotonically-increasing hours.
                 core_temp_c, uptime_hours = compute_asset_metrics(asset_id, tick_bucket)
-                await producer.publish_snapshot(
-                    asset_id=asset_id,
-                    asset_state=asset_state,
-                    profile_name=profile.name,
-                    elements=elements,
-                    degraded=degraded,
-                    core_temp_c=core_temp_c,
-                    uptime_hours=uptime_hours,
-                )
+                try:
+                    await producer.publish_snapshot(
+                        asset_id=asset_id,
+                        asset_state=asset_state,
+                        profile_name=profile.name,
+                        elements=elements,
+                        degraded=degraded,
+                        core_temp_c=core_temp_c,
+                        uptime_hours=uptime_hours,
+                    )
+                except MessageSizeTooLargeError:
+                    # A single asset whose element tree serializes larger than
+                    # the producer / broker max message size must NOT abort the
+                    # whole tick. Unguarded, one oversized asset blanks the
+                    # ENTIRE fleet: the tick raises here, every asset after it
+                    # goes unpublished, and the next tick dies at the same
+                    # asset forever (no tiles for anyone). Log the culprit with
+                    # its element count so the operator can see which asset /
+                    # profile is oversized, then skip it (and its inventory)
+                    # and keep publishing the rest of the fleet.
+                    log.error(
+                        "asset %s (variant=%s, %d elements) element snapshot "
+                        "exceeds Kafka max message size; skipping this asset "
+                        "this tick. Fix: raise the topic's max.message.bytes + "
+                        "producer max_request_size, or reduce this profile's "
+                        "element depth. The rest of the fleet still publishes.",
+                        asset_id, asset_state.platform_variant, len(elements),
+                    )
+                    continue
+                except Exception:
+                    # Any other single-asset publish failure is likewise
+                    # non-fatal to the rest of the fleet's tick.
+                    log.exception(
+                        "snapshot publish failed for %s; skipping this asset "
+                        "this tick (rest of fleet unaffected)", asset_id,
+                    )
+                    continue
                 # Per-layer inventory aggregate (asset-element-inventory).
                 # Same per-element signal, rolled up to a "spares
                 # consumed" count per layer so the maintainer view's
