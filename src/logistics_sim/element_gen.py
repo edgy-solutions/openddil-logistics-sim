@@ -82,6 +82,11 @@ class SeverityTier(enum.Enum):
     # Diagnostics card reads OFF -- only the per-element view was
     # lying, saying the hardware was degraded.
     POWER_OFF = "POWER_OFF"
+    # The source made NO CLAIM on either axis. Distinct from NOMINAL, which
+    # is a positive assertion of health (ADR-0026 §Amendment clause 4:
+    # absence and health must not share an exit). Kept out of the "bad"
+    # tiers deliberately -- see is_degraded().
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,6 +102,27 @@ class AssetState:
     # tx/rx off (that would be the wrong demo signal).
     actively_transmitting: bool = True
     actively_receiving: bool = True
+
+    def as_unclaimed(self) -> "AssetState":
+        """Return this state with both axes reset to "no claim".
+
+        THE HONEST-ABSENCE PATH NEEDS TO BE REACHABLE ON PURPOSE. Unspecified
+        health is the NORMAL condition for DIS-sourced assets, and a
+        generator that always produces a definite state cannot exercise the
+        treatment ADR-0026's amendment schedules for it. Driven by a profile
+        flag (`force_unspecified_state`) so a demo or test can reproduce the
+        condition deterministically rather than waiting for a feed to omit
+        something.
+
+        tx/rx are left alone deliberately: they are separate discrete cues,
+        not part of the axis claim, and zeroing them here would recreate the
+        UNSPECIFIED-plus-quiet combination that lit the fleet yellow on
+        2026-06-24."""
+        return dataclasses.replace(
+            self,
+            power_state="POWER_STATE_UNSPECIFIED",
+            health_state="HEALTH_STATE_UNSPECIFIED",
+        )
 
     def severity_tier(self,
                        degraded_power_states: tuple[str, ...],
@@ -161,6 +187,22 @@ class AssetState:
             return SeverityTier.DEGRADED
         if p == "POWER_STATE_MAINTENANCE":
             return SeverityTier.DEGRADED
+
+        # ABSENCE IS NOT HEALTH (ADR-0026 §Amendment, telemetry.proto
+        # §WHAT *_UNSPECIFIED MEANS). If the source claimed nothing on
+        # either axis, say so rather than falling through to NOMINAL --
+        # NOMINAL is a positive assertion and must be reached deliberately.
+        #
+        # This is the collapse the convention was written to end: fusion's
+        # _eval_operational_state and this resolver arrived at "treat
+        # silence as fine" independently, in two repositories, and one of
+        # them wrote it down approvingly.
+        if (h == "HEALTH_STATE_UNSPECIFIED"
+                and p in ("POWER_STATE_UNSPECIFIED", "")):
+            return SeverityTier.UNKNOWN
+
+        # Reached only by an explicit claim: NOMINAL health, or a power
+        # state that carries no badness (ON / STANDBY / STARTING).
         return SeverityTier.NOMINAL
 
     def is_degraded(self, degraded_power_states: tuple[str, ...],
@@ -170,9 +212,23 @@ class AssetState:
         on (main.py tick loop's degraded_count tally, publisher's
         `degraded` envelope field). New code should call
         severity_tier() directly."""
+        # UNKNOWN IS NOT DEGRADED, and this line is load-bearing.
+        #
+        # The naive form of the tier fix above -- `!= NOMINAL` -- would flip
+        # every asset whose feed omits operational_state into "degraded".
+        # That exact behaviour shipped once: on 2026-06-24 a live feed left
+        # the block absent and EVERY MRAD lit up yellow on the work cluster.
+        # It was backed out, and it is the evidence behind ADR-0026's clause
+        # 2 (absence never folds into an operational category -- and
+        # "degraded" is one).
+        #
+        # So absence is excluded from the badness question rather than
+        # answered into it. "Do we know of a problem?" is No. "Do we know
+        # this asset is fine?" is a DIFFERENT question, and the tier now
+        # answers it separately instead of conflating the two.
         return self.severity_tier(
             degraded_power_states, degraded_health_states,
-        ) != SeverityTier.NOMINAL
+        ) not in (SeverityTier.NOMINAL, SeverityTier.UNKNOWN)
 
 
 @dataclasses.dataclass(frozen=True)

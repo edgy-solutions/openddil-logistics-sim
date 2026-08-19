@@ -459,12 +459,32 @@ def test_severity_tier_NOMINAL_for_healthy_asset():
     assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
 
 
-def test_severity_tier_NOMINAL_for_unspecified_state():
-    """UNSPECIFIED is treated as healthy -- no badness signal, no
-    visual degradation. Customer feeds that don't populate
-    OperationalState fall here."""
+def test_severity_tier_UNKNOWN_for_unspecified_state():
+    """UNSPECIFIED is NOT healthy -- it is the absence of a claim.
+
+    This test previously asserted NOMINAL and its docstring read
+    "UNSPECIFIED is treated as healthy". That was the collapse ADR-0026's
+    amendment exists to end: absence and health shared an exit, so a feed
+    that said nothing was indistinguishable from a feed that said "fine".
+    Fusion reached the same default independently, in another repository —
+    two components, one identical mistake, which is what an uncited
+    convention produces.
+
+    NOMINAL is now reachable only by an explicit positive claim."""
     s = AssetState(platform_variant="MRAD2_radar")
-    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
+
+
+def test_unknown_is_not_degraded():
+    """The 2026-06-24 regression, guarded from the other side.
+
+    UNKNOWN must not answer the badness question. Had the tier fix used the
+    obvious `!= NOMINAL`, every asset whose feed omits operational_state
+    would have flipped to degraded -- which is precisely what lit the whole
+    fleet yellow on the work cluster and was backed out."""
+    s = AssetState(platform_variant="MRAD2_radar")
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
+    assert s.is_degraded(DEGRADED_POWER, DEGRADED_HEALTH) is False
 
 
 def test_severity_tier_FAILED_when_health_FAILED():
@@ -567,7 +587,7 @@ def test_severity_tier_FAULT_when_tx_rx_both_off_with_nominal_health():
     assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
 
 
-def test_severity_tier_NOMINAL_when_UNSPECIFIED_with_tx_rx_off():
+def test_severity_tier_UNKNOWN_when_UNSPECIFIED_with_tx_rx_off():
     """When the upstream feed doesn't populate operational_state at
     all, the proto3 wire-absent case gives UNSPECIFIED health AND
     actively_transmitting=False (proto3 scalar default for bool).
@@ -576,7 +596,13 @@ def test_severity_tier_NOMINAL_when_UNSPECIFIED_with_tx_rx_off():
     mis-classified as FAULT and light up the maintainer view yellow,
     which is the exact 2026-06-24 work-cluster regression this rule
     is here to prevent. Mismatch requires NOMINAL health (positive
-    signal) before treating tx+rx off as a fault."""
+    signal) before treating tx+rx off as a fault.
+
+    Since 2026-08-19 the outcome is UNKNOWN rather than NOMINAL: the
+    mismatch rule still must not fire, but "no claim" is now reported as
+    no claim instead of as health. The regression this guards against is
+    unchanged -- what changed is that not-degraded and healthy are no
+    longer the same answer."""
     s = AssetState(
         platform_variant="MRAD2_radar",
         power_state="POWER_STATE_UNSPECIFIED",
@@ -584,7 +610,8 @@ def test_severity_tier_NOMINAL_when_UNSPECIFIED_with_tx_rx_off():
         actively_transmitting=False,
         actively_receiving=False,
     )
-    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
+    assert s.is_degraded(DEGRADED_POWER, DEGRADED_HEALTH) is False
 
 
 def test_severity_tier_DEGRADED_when_health_DEGRADED():
