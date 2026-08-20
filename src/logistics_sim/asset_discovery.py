@@ -158,6 +158,31 @@ def _coerce_bool(value: object, default: bool) -> bool:
     return default
 
 
+def _kills_from(data: dict) -> frozenset[str]:
+    """Subsystem kills from Silver `active_fault_codes`.
+
+    Reads the "SUBSYS:HEALTH" form the DIS appearance mapping emits and
+    fusion's _eval_subsystems already parses — one vocabulary, no translation
+    layer. Only INOPERATIVE counts as a kill: DEGRADED is impairment, and
+    conflating the two would let a worn subsystem cap an asset the same way a
+    destroyed one does.
+
+    An EMPTY set means the tactical plane said nothing. It must never be read
+    as "no kills" — that is the absence-as-nominal mistake, and the caller
+    (tactical_cap) is written so silence yields no cap at all.
+    """
+    codes = (((data.get("sustainment") or {}).get("health") or {})
+             .get("active_fault_codes") or [])
+    out = set()
+    for code in codes:
+        if not isinstance(code, str) or ":" not in code:
+            continue
+        subsys, health = code.split(":", 1)
+        if health.strip().upper() == "INOPERATIVE":
+            out.add(subsys.strip().upper())
+    return frozenset(out)
+
+
 def _asset_state_from_json(data: dict) -> tuple[str, str, AssetState] | None:
     """JSON-encoded EntityTelemetryEvent shape. Pulls (asset_id,
     platform_variant, AssetState) -- returns None if asset_id or
@@ -174,6 +199,7 @@ def _asset_state_from_json(data: dict) -> tuple[str, str, AssetState] | None:
         health_state=_coerce_health_state(op.get("health_state")),
         actively_transmitting=_coerce_bool(op.get("actively_transmitting"), True),
         actively_receiving=_coerce_bool(op.get("actively_receiving"), True),
+        subsystem_kills=_kills_from(data),
     )
     return str(asset_id), str(variant), state
 

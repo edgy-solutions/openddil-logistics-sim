@@ -89,6 +89,19 @@ class SeverityTier(enum.Enum):
     UNKNOWN = "UNKNOWN"
 
 
+# Ordering for "which of these is worse". UNKNOWN sits at the BOTTOM, not
+# with the bad tiers: absence is not badness (the 2026-06-24 lesson), and a
+# cap must never be beaten by silence.
+_TIER_BADNESS = {
+    "UNKNOWN": 0,
+    "NOMINAL": 1,
+    "DEGRADED": 2,
+    "FAULT": 3,
+    "FAILED": 4,
+    "POWER_OFF": 5,
+}
+
+
 @dataclasses.dataclass(frozen=True)
 class AssetState:
     """Snapshot of the customer-sim-reported state per asset. Discovery
@@ -102,6 +115,62 @@ class AssetState:
     # tx/rx off (that would be the wrong demo signal).
     actively_transmitting: bool = True
     actively_receiving: bool = True
+
+    # Tactical subsystem kills, read from Silver active_fault_codes. Empty
+    # means NO CLAIM — the tactical plane said nothing about this asset's
+    # subsystems, which is not the same as saying they are fine.
+    subsystem_kills: frozenset[str] = frozenset()
+
+    def tactical_cap(self) -> SeverityTier | None:
+        """The worst tier the TACTICAL plane permits this asset to claim.
+
+        ADR-0039's bridging thesis, as one function: the sustainment picture
+        may not contradict tactical truth it does not own. A destroyed
+        platform cannot be reported mission-capable by a logistics feed,
+        whatever that feed believes.
+
+        THIS CAPS, IT NEVER MANUFACTURES. Returning None means the tactical
+        plane made no claim, and the sim's own scenario stands unchanged — an
+        asset with no damage signal does NOT become "healthy because
+        undamaged". That direction is the whole discipline: a constraint that
+        can only make things worse cannot invent good news, and good news
+        invented from silence is the defect this codebase has been removing
+        all week.
+
+        The kills are read from `active_fault_codes` in the "SUBSYS:HEALTH"
+        form the DIS appearance mapping emits, which is fusion's existing
+        vocabulary — so no new contract was needed on either side.
+        """
+        # Destroyed is carried on the health axis, not as a kill code.
+        if self.health_state == "HEALTH_STATE_FAILED":
+            return SeverityTier.FAILED
+        # A kill is a capability that is GONE, not impaired. Both propulsion
+        # and weapons cap at FAULT rather than DEGRADED for that reason; the
+        # asset is not slower or weaker, it has lost a function.
+        if self.subsystem_kills:
+            return SeverityTier.FAULT
+        return None
+
+    def constrained_tier(self,
+                         degraded_power_states: tuple[str, ...],
+                         degraded_health_states: tuple[str, ...]) -> SeverityTier:
+        """severity_tier(), capped by what the tactical plane permits.
+
+        Order matters and is deliberate: the sim's own resolution runs first
+        and the cap is applied afterwards, so the cap can only move the
+        answer toward "worse". If the sim already says FAILED, a FAULT cap
+        does not soften it.
+        """
+        own = self.severity_tier(degraded_power_states, degraded_health_states)
+        cap = self.tactical_cap()
+        if cap is None:
+            return own
+        # UNKNOWN means the sim made no claim; a tactical claim is strictly
+        # more information than none, so it wins rather than being averaged
+        # against silence.
+        if own is SeverityTier.UNKNOWN:
+            return cap
+        return max(own, cap, key=lambda t: _TIER_BADNESS[t.value])
 
     def as_unclaimed(self) -> "AssetState":
         """Return this state with both axes reset to "no claim".

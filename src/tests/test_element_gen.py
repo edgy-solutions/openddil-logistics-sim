@@ -848,3 +848,106 @@ def test_back_compat_is_degraded_still_works():
     ]:
         assert state.is_degraded(DEGRADED_POWER, DEGRADED_HEALTH) is True, \
             f"is_degraded must be True for {state}"
+
+
+# ---------------------------------------------------------------------------
+# Tactical-damage constraint set (ADR-0039 bridging thesis)
+# ---------------------------------------------------------------------------
+
+def test_destroyed_cap_is_currently_REDUNDANT_and_that_is_the_finding():
+    """The destroyed cap cannot fire today, and the reason is structural.
+
+    Written expecting to assert "a destroyed platform cannot be reported
+    mission-capable". A mutation that DELETED the destroyed branch left the
+    whole suite green, which is how the redundancy surfaced — the test
+    asserted a true outcome reached by the wrong path.
+
+    The cause: the sim's only health input is `health_state`, read from
+    Silver — the SAME field the DIS appearance mapping populates. So the
+    sim cannot hold an opinion that disagrees with the tactical plane about
+    destruction; `severity_tier()` already resolves FAILED from that field
+    and the cap has nothing left to constrain. Verified across every power
+    state: none makes the capped answer differ from the uncapped one.
+
+    ON THE HEALTH AXIS, CORRELATION IS CURRENTLY IDENTITY, NOT CONSTRAINT.
+    The sim echoes the tactical claim rather than being limited by it, and
+    the two-plane DISAGREEMENT demo needs a second opinion that does not
+    exist yet.
+
+    The branch is kept rather than deleted: it costs nothing, and it is the
+    guard that catches a future severity_tier rule which resolves a
+    FAILED-health asset to something better. This test pins the redundancy
+    so the day it stops being redundant is visible.
+
+    The KILL constraint is a different story and is genuinely load-bearing —
+    kills arrive on `active_fault_codes`, a field severity_tier does not
+    read, so there the sim really can be constrained by information it did
+    not have.
+    """
+    for power in ("POWER_STATE_ON", "POWER_STATE_MAINTENANCE",
+                  "POWER_STATE_STANDBY", "POWER_STATE_UNSPECIFIED",
+                  "POWER_STATE_OFF"):
+        s = AssetState(platform_variant="MRAD2_radar",
+                       power_state=power,
+                       health_state="HEALTH_STATE_FAILED")
+        assert (s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH)
+                is s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH)), power
+    # And the cap itself is still correctly derived, even though nothing
+    # downstream needs it yet.
+    s = AssetState(platform_variant="MRAD2_radar",
+                   health_state="HEALTH_STATE_FAILED")
+    assert s.tactical_cap() is SeverityTier.FAILED
+
+
+def test_kill_caps_an_otherwise_nominal_asset():
+    """A subsystem kill constrains an asset the sim would call fine."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_ON",
+        health_state="HEALTH_STATE_NOMINAL",
+        subsystem_kills=frozenset({"PROPULSION"}),
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.NOMINAL
+    assert s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
+
+
+def test_constraints_cap_but_never_manufacture():
+    """THE DISCIPLINE, asserted rather than described.
+
+    No tactical claim means no cap: the sim's own answer stands untouched.
+    An asset with no damage signal does NOT become healthy-because-undamaged,
+    which is the direction every absence defect this codebase has removed ran
+    in.
+    """
+    for own_health, expected in (
+        ("HEALTH_STATE_NOMINAL",  SeverityTier.NOMINAL),
+        ("HEALTH_STATE_DEGRADED", SeverityTier.DEGRADED),
+        ("HEALTH_STATE_UNSPECIFIED", SeverityTier.UNKNOWN),
+    ):
+        s = AssetState(platform_variant="MRAD2_radar",
+                       power_state="POWER_STATE_ON" if "UNSPEC" not in own_health else "POWER_STATE_UNSPECIFIED",
+                       health_state=own_health)
+        assert s.tactical_cap() is None, own_health
+        assert s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH) is expected, own_health
+
+
+def test_a_cap_never_softens_a_worse_local_answer():
+    """Capping moves toward worse only. A FAULT-level kill must not rescue
+    an asset the sim already resolved to POWER_OFF."""
+    s = AssetState(
+        platform_variant="MRAD2_radar",
+        power_state="POWER_STATE_OFF",
+        health_state="HEALTH_STATE_NOMINAL",
+        subsystem_kills=frozenset({"WEAPONS"}),
+    )
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.POWER_OFF
+    assert s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.POWER_OFF
+
+
+def test_tactical_claim_beats_sim_silence():
+    """UNKNOWN is the absence of a claim, so a tactical claim is strictly
+    more information and wins — rather than being averaged against nothing."""
+    s = AssetState(platform_variant="MRAD2_radar",
+                   subsystem_kills=frozenset({"WEAPONS"}))
+    assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
+    assert s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
