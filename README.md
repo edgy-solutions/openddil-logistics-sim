@@ -34,6 +34,12 @@ the customer sim reports.
   element_id, tick_bucket) so the same asset stays consistent
   across re-renders, different assets are independent, ticks
   produce visible movement. Locked in by tests.
+- **Releasability labelling** (`releasability.py`) — resolves each
+  asset's `originator_nation` / `releasable_to` from the deployment's
+  releasability declaration (`releasability_path`) and stamps them on
+  both published envelopes. An asset the declaration doesn't name
+  falls back to the deployment's `site_nation` if one is configured,
+  or gets no label at all.
 
 ## Architecture
 
@@ -92,6 +98,8 @@ ConfigMap.
 | `degraded_power_states[]` | `PowerState` enum names that count as degraded |
 | `degraded_health_states[]` | `HealthState` enum names that count as degraded |
 | `asset_profiles[]` | One entry per asset TYPE — see below |
+| `releasability_path` | Path to the releasability declaration YAML (see below) |
+| `site_nation` | Deployment default originator nation for undeclared assets; empty = no fallback |
 
 ### Per-profile keys
 
@@ -113,6 +121,36 @@ ConfigMap.
 | `LOGISTICS_SIM_CONSUMER_GROUP_PREFIX` | `logistics-sim` |
 | `LOG_LEVEL` | `INFO` |
 
+### Deployment identity (env)
+
+Env wins over the matching YAML key, same convention as the Kafka
+wiring above.
+
+| Env | YAML key | Default |
+|---|---|---|
+| `LOGISTICS_SIM_RELEASABILITY_PATH` | `releasability_path` | `/ontology/releasability.yaml` |
+| `LOGISTICS_SIM_SITE_NATION` | `site_nation` | `""` (unset) |
+
+## Releasability labelling
+
+`releasability.py` loads the releasability declaration at
+`releasability_path` (shape and rules: see that file's header) and
+resolves each published asset to a `Label(originator_nation,
+releasable_to)`, in precedence order: the asset's own entry in the
+declaration, then the declaration's `default_originator_nation`, then
+the deployment's `site_nation`, then no label. A missing declaration
+file is not fatal — the sim runs unlabelled (or falls back to
+`site_nation`) and logs a warning rather than failing to start.
+
+When a label resolves, both published envelopes (element-telemetry
+snapshot and inventory) carry `originator_nation` and `releasable_to`
+at the top level, alongside `asset_id`. When no label resolves, both
+keys are **absent** from the envelope — not emitted as `""`, `null`,
+or `[]` — since an empty `releasable_to` list is a distinct, real fact
+(labelled, releasable to nobody) from having no label at all. This
+repo only emits these fields; whether anything downstream reads them
+is outside its scope.
+
 ## Element id format
 
 Identical to the frontend `SensorArrayView` for matching `liveTelemetry`
@@ -127,6 +165,8 @@ One Kafka record per asset per tick, JSON, keyed by `asset_id`:
 ```json
 {
   "asset_id": "demo:mrad-sensor-001",
+  "originator_nation": "ATL",
+  "releasable_to": ["BDR"],
   "platform_variant": "MRAD2_radar",
   "profile_name": "mrad",
   "observed_at_ns": 1781340000000000000,

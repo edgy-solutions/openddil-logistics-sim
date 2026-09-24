@@ -15,6 +15,9 @@ available. Code lives under `src/logistics_sim/`; the entry point is
 - **Edit the synthesis logic** in `element_gen.py`, the discovery logic in
   `asset_discovery.py`, and the emit path in `publisher.py`.
 - **Edit `config/default.yaml`** to change rates, fractions, or topic names.
+- **Edit `releasability.py`** to change how the releasability declaration
+  (`releasability_path`) resolves an asset's `originator_nation` /
+  `releasable_to` labels for the two published envelopes.
 - **Run the tests**: `uv sync` then `uv run pytest src/tests/`.
 - **Run the sim locally** against a local broker.
 
@@ -41,6 +44,20 @@ Captured fixtures and docs-derived JSON **drift from what the live sim emits**.
 - When you add or rename a field, extend the alias map rather than switching it.
 - A passing unit test is not evidence the wire is right. Verify against a real
   broker (`rpk topic consume ...`) before calling anything wired.
+
+## Releasability labelling
+
+`releasability.py` resolves each published asset's `originator_nation`
+/ `releasable_to` from the declaration at `releasability_path`
+(env `LOGISTICS_SIM_RELEASABILITY_PATH`), falling back to
+`site_nation` (env `LOGISTICS_SIM_SITE_NATION`) for assets the
+declaration doesn't name, per the precedence rules documented in that
+module and in the declaration file's own header. Both fields land at
+the top level of both published envelopes (element-telemetry snapshot
+and inventory) — but are **absent**, not empty/null, when no label
+resolves. Don't default that absence to a placeholder value; the gate
+this feeds depends on being able to tell "not labelled" apart from
+"labelled with an empty/default value."
 
 ## Known Gap — element state is a boolean today
 

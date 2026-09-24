@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from logistics_sim.config import SimConfig
 
 
@@ -175,3 +177,77 @@ def test_variant_suffix_map_empty_when_no_suffix_configured(tmp_path: Path) -> N
     yaml = _write_profile_with_suffix(tmp_path, None)
     cfg = SimConfig.load(yaml)
     assert cfg.variant_suffix_map == {"MRAD_Sensor": ""}
+
+
+# ---------------------------------------------------------------------------
+# releasability_path / site_nation -- deployment identity, env wins over
+# YAML (same convention as the Kafka wiring fields).
+# ---------------------------------------------------------------------------
+
+def test_releasability_defaults_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOGISTICS_SIM_RELEASABILITY_PATH", raising=False)
+    monkeypatch.delenv("LOGISTICS_SIM_SITE_NATION", raising=False)
+    yaml = _write_profile_with_suffix(tmp_path, None)
+    cfg = SimConfig.load(yaml)
+    assert cfg.releasability_path == "/ontology/releasability.yaml"
+    assert cfg.site_nation == ""
+
+
+def test_releasability_read_from_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOGISTICS_SIM_RELEASABILITY_PATH", raising=False)
+    monkeypatch.delenv("LOGISTICS_SIM_SITE_NATION", raising=False)
+    lines = [
+        "tick_interval_s: 30",
+        "output_topic: asset-element-telemetry",
+        "releasability_path: /custom/releasability.yaml",
+        "site_nation: ATL",
+        "asset_profiles:",
+        "  - name: mrad",
+        '    matches_platform_variants: ["MRAD_Sensor"]',
+        "    layers:",
+        "      - name: RADAR UNIT",
+        "        prefix: TR",
+        "    faces:",
+        "      - name: PRIMARY APERTURE",
+        "        cols: 1",
+        "        rows: 1",
+        "    synthesis:",
+        "      health_nominal_min: 0.55",
+        "      health_nominal_max: 0.85",
+        "      degraded_fraction: 0.15",
+    ]
+    f = tmp_path / "releasability_config.yaml"
+    f.write_text("\n".join(lines) + "\n")
+    cfg = SimConfig.load(f)
+    assert cfg.releasability_path == "/custom/releasability.yaml"
+    assert cfg.site_nation == "ATL"
+
+
+def test_releasability_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        "tick_interval_s: 30",
+        "output_topic: asset-element-telemetry",
+        "releasability_path: /custom/releasability.yaml",
+        "site_nation: ATL",
+        "asset_profiles:",
+        "  - name: mrad",
+        '    matches_platform_variants: ["MRAD_Sensor"]',
+        "    layers:",
+        "      - name: RADAR UNIT",
+        "        prefix: TR",
+        "    faces:",
+        "      - name: PRIMARY APERTURE",
+        "        cols: 1",
+        "        rows: 1",
+        "    synthesis:",
+        "      health_nominal_min: 0.55",
+        "      health_nominal_max: 0.85",
+        "      degraded_fraction: 0.15",
+    ]
+    f = tmp_path / "releasability_env_config.yaml"
+    f.write_text("\n".join(lines) + "\n")
+    monkeypatch.setenv("LOGISTICS_SIM_RELEASABILITY_PATH", "/env/releasability.yaml")
+    monkeypatch.setenv("LOGISTICS_SIM_SITE_NATION", "BDR")
+    cfg = SimConfig.load(f)
+    assert cfg.releasability_path == "/env/releasability.yaml"
+    assert cfg.site_nation == "BDR"

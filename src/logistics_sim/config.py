@@ -135,6 +135,14 @@ class SimConfig:
     input_topic: str
     consumer_group_prefix: str
 
+    # Deployment identity -- not Kafka wiring, but the same env-wins-
+    # over-YAML convention applies. `site_nation` defaults to "" (unset)
+    # deliberately: an unset site nation must make an undeclared asset
+    # fall through to NO label rather than silently default to some
+    # nation, per releasability.py's precedence rules.
+    releasability_path: str
+    site_nation: str
+
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "SimConfig":
         with open(path, "rt") as f:
@@ -167,6 +175,17 @@ class SimConfig:
             "LOGISTICS_SIM_CONSUMER_GROUP_PREFIX", "logistics-sim",
         )
 
+        # Deployment identity -- env wins over YAML, same convention as
+        # the Kafka wiring above.
+        releasability_path = os.environ.get(
+            "LOGISTICS_SIM_RELEASABILITY_PATH",
+            str(raw.get("releasability_path", "/ontology/releasability.yaml")),
+        )
+        site_nation = os.environ.get(
+            "LOGISTICS_SIM_SITE_NATION",
+            str(raw.get("site_nation", "")),
+        )
+
         return cls(
             tick_interval_s=float(raw.get("tick_interval_s", 30)),
             output_topic=str(raw.get("output_topic", "asset-element-telemetry")),
@@ -189,6 +208,8 @@ class SimConfig:
             hq_brokers=hq_brokers,
             input_topic=input_topic,
             consumer_group_prefix=consumer_group_prefix,
+            releasability_path=releasability_path,
+            site_nation=site_nation,
         )
 
     def profile_for_variant(self, platform_variant: str) -> AssetProfile | None:

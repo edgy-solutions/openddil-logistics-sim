@@ -24,6 +24,7 @@ from .asset_discovery import AssetRoster, run_edge_discovery
 from .config import SimConfig
 from .element_gen import cardinality, compute_asset_metrics, generate_snapshot
 from .publisher import HqProducer
+from .releasability import ReleasabilityDeclaration
 
 log = logging.getLogger("logistics_sim.main")
 
@@ -178,7 +179,16 @@ def _clock() -> float:
 
 async def _serve(cfg: SimConfig) -> int:
     roster = AssetRoster()
-    producer = HqProducer(cfg.hq_brokers, cfg.output_topic)
+    declaration = ReleasabilityDeclaration.load(
+        cfg.releasability_path, site_nation=cfg.site_nation,
+    )
+    log.info(
+        "releasability declaration loaded from %s -- %d asset(s) named; "
+        "site default=%s",
+        cfg.releasability_path, declaration.asset_count,
+        cfg.site_nation if cfg.site_nation else "(none)",
+    )
+    producer = HqProducer(cfg.hq_brokers, cfg.output_topic, declaration=declaration)
     await producer.start()
 
     matched = cfg.all_matched_variants

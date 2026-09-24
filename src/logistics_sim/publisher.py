@@ -5,6 +5,8 @@ Payload envelope (one Kafka record per asset per tick, JSON):
 
   {
     "asset_id": "<asset_id>",
+    "originator_nation": "<nation code>",   # present only when labelled
+    "releasable_to": ["<nation code>", ...], # -- see releasability.py
     "platform_variant": "<variant>",
     "profile_name": "<asset_profiles[].name>",
     "observed_at_ns": <int>,
@@ -40,6 +42,8 @@ Inventory envelope (one Kafka record per (asset, layer) per tick):
 
   {
     "asset_id": "<asset_id>",
+    "originator_nation": "<nation code>",   # present only when labelled
+    "releasable_to": ["<nation code>", ...], # -- see releasability.py
     "layer_name": "T/R MODULE",
     "platform_variant": "<variant>",
     "available_count": 91,
@@ -47,6 +51,14 @@ Inventory envelope (one Kafka record per (asset, layer) per tick):
     "total_count":     96,
     "observed_at_ns": <int>
   }
+
+2026-09-23: both envelopes above carry a releasability label
+(`originator_nation` + `releasable_to`) when the configured
+ReleasabilityDeclaration (see releasability.py) resolves one for the
+asset. Absence of both keys -- not `""`/`null`/`[]` -- is how an
+unlabelled asset is distinguished from a labelled-but-not-released-
+to-anyone asset ("releasable_to": []), since a placeholder value and
+a real empty list are indistinguishable on the wire otherwise.
 """
 from __future__ import annotations
 
@@ -58,6 +70,7 @@ import time
 from aiokafka import AIOKafkaProducer
 
 from .element_gen import AssetState, ElementTelemetry
+from .releasability import ReleasabilityDeclaration
 
 log = logging.getLogger("logistics_sim.publisher")
 
@@ -93,12 +106,38 @@ class HqProducer:
     """
 
     def __init__(
-        self, brokers: str, topic: str, inventory_topic: str = "asset-element-inventory",
+        self,
+        brokers: str,
+        topic: str,
+        inventory_topic: str = "asset-element-inventory",
+        *,
+        declaration: ReleasabilityDeclaration | None = None,
     ) -> None:
         self._brokers = brokers
         self._topic = topic
         self._inventory_topic = inventory_topic
         self._producer: AIOKafkaProducer | None = None
+        # None means "no releasability wiring at all" -- every envelope
+        # is emitted exactly as before, with no label fields. Keeps
+        # every pre-existing caller/test valid without change.
+        self._declaration = declaration
+
+    def _label_fields(self, asset_id: str) -> dict:
+        """originator_nation / releasable_to for this asset, or {}.
+        Absence (not "" / null / []) is the signal that the asset is
+        unlabelled -- an empty releasable_to list is a DIFFERENT fact
+        (labelled, releasable to nobody) that the wire can't otherwise
+        distinguish from "no label was ever computed", so the producer
+        must not emit a placeholder for the unlabelled case."""
+        if self._declaration is None:
+            return {}
+        label = self._declaration.label_for(asset_id)
+        if label is None:
+            return {}
+        return {
+            "originator_nation": label.originator_nation,
+            "releasable_to": list(label.releasable_to),
+        }
 
     async def start(self) -> None:
         self._producer = AIOKafkaProducer(
@@ -153,6 +192,7 @@ class HqProducer:
             operational["uptime_hours"] = uptime_hours
         envelope = {
             "asset_id": asset_id,
+            **self._label_fields(asset_id),
             "platform_variant": asset_state.platform_variant,
             "profile_name": profile_name,
             "observed_at_ns": time.time_ns(),
@@ -228,6 +268,7 @@ class HqProducer:
             total = counts["total"]
             envelope = {
                 "asset_id": asset_id,
+                **self._label_fields(asset_id),
                 "layer_name": layer_name,
                 "platform_variant": asset_state.platform_variant,
                 "available_count": total - allocated,
