@@ -115,6 +115,27 @@ class ReleasabilityDeclaration:
                 originator_nation=originator, releasable_to=releasable_to,
             )
 
+        # A DECLARATION THAT LABELS NOBODY IS A DEFECT, NOT A FLOOR.
+        # Unlabelled is a legal answer -- that is deny-unlabeled working --
+        # so a document that resolves to no labels at all produces a run
+        # that passes while proving nothing. Compose did exactly that for as
+        # long as it existed, against a zero-byte file created by a bind
+        # mount, and nothing said a word. Refuse instead.
+        #
+        # A document-wide default labels every asset, so a file that sets
+        # one and names no assets individually has declared something. Only
+        # neither is a refusal. A MISSING file is a different fact and keeps
+        # its warning above: a deployment may legitimately have no
+        # declaration, but one that has authored a file has said it does.
+        if not assets and not default_originator_nation:
+            raise ValueError(
+                f"{path}: the declaration is present and labels nobody -- "
+                f"`assets` is empty and `default_originator_nation` is unset. "
+                f"A declaration that resolves to zero labels makes every "
+                f"published envelope unlabelled, which downstream cannot tell "
+                f"from a fleet nobody ever declared."
+            )
+
         return cls(
             assets=assets,
             default_originator_nation=default_originator_nation,

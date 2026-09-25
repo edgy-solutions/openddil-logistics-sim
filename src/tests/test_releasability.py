@@ -144,11 +144,15 @@ assets: {}
 
 
 def test_unknown_site_nation_raises(tmp_path: Path) -> None:
+    # Declares an asset, and the message is matched. With neither, this test
+    # passes on the zero-label refusal instead -- it would stay green with
+    # the site_nation check deleted.
     path = _write_declaration(tmp_path, _BASE_NATIONS + """
 default_originator_nation: null
-assets: {}
+assets:
+  "dis:1:1:1000": { originator_nation: ATL, releasable_to: [] }
 """)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="site_nation"):
         ReleasabilityDeclaration.load(path, site_nation="ZZZ")
 
 
@@ -225,9 +229,14 @@ assets:
 
 @pytest.mark.asyncio
 async def test_snapshot_envelope_omits_label_keys_when_unlabelled(tmp_path: Path) -> None:
+    # The document declares SOMEBODY and the published asset is not them.
+    # It used to declare nobody at all -- the state the loader now refuses --
+    # in which every envelope is unlabelled and an assertion about absence
+    # cannot fail.
     path = _write_declaration(tmp_path, _BASE_NATIONS + """
 default_originator_nation: null
-assets: {}
+assets:
+  "dis:1:1:1000": { originator_nation: ATL, releasable_to: [] }
 """)
     decl = ReleasabilityDeclaration.load(path)
     producer, stub = _make_producer(decl)
@@ -271,9 +280,14 @@ assets:
 
 @pytest.mark.asyncio
 async def test_inventory_envelope_omits_label_keys_when_unlabelled(tmp_path: Path) -> None:
+    # The document declares SOMEBODY and the published asset is not them.
+    # It used to declare nobody at all -- the state the loader now refuses --
+    # in which every envelope is unlabelled and an assertion about absence
+    # cannot fail.
     path = _write_declaration(tmp_path, _BASE_NATIONS + """
 default_originator_nation: null
-assets: {}
+assets:
+  "dis:1:1:1000": { originator_nation: ATL, releasable_to: [] }
 """)
     decl = ReleasabilityDeclaration.load(path)
     producer, stub = _make_producer(decl)
@@ -283,3 +297,49 @@ assets: {}
     envelope = json.loads(stub.sent[0][1])
     assert "originator_nation" not in envelope
     assert "releasable_to" not in envelope
+
+
+# ---------------------------------------------------------------------------
+# A declaration that labels nobody is refused
+# ---------------------------------------------------------------------------
+
+def test_authored_declaration_that_labels_nobody_raises(tmp_path: Path) -> None:
+    """The compose defect, at the reader. A file that parses and names no
+    one makes every envelope unlabelled -- a LEGAL answer, and therefore a
+    run that passes while proving nothing."""
+    path = _write_declaration(tmp_path, _BASE_NATIONS + """
+default_originator_nation: null
+assets: {}
+""")
+    with pytest.raises(ValueError, match="labels nobody"):
+        ReleasabilityDeclaration.load(path)
+
+
+def test_zero_byte_declaration_raises(tmp_path: Path) -> None:
+    """The defect exactly as it was made: a nested single-file bind mount
+    into a writable parent creates a zero-byte file, which parses as a fleet
+    of no assets."""
+    path = tmp_path / "releasability.yaml"
+    path.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="labels nobody"):
+        ReleasabilityDeclaration.load(path)
+
+
+def test_document_default_alone_is_not_refused(tmp_path: Path) -> None:
+    """Naming no assets individually is not the same as labelling nobody:
+    a document-wide default labels all of them."""
+    path = _write_declaration(tmp_path, _BASE_NATIONS + """
+default_originator_nation: ATL
+assets: {}
+""")
+    decl = ReleasabilityDeclaration.load(path)
+    assert decl.asset_count == 0
+    assert decl.label_for("dis:9:9:9999").originator_nation == "ATL"
+
+
+def test_missing_file_is_not_the_same_as_labelling_nobody(tmp_path: Path) -> None:
+    """A deployment may legitimately have no declaration. One that has
+    AUTHORED a file has said it does, which is why only the second refuses."""
+    decl = ReleasabilityDeclaration.load(tmp_path / "absent.yaml")
+    assert decl.asset_count == 0
+    assert decl.label_for("dis:9:9:9999") is None
