@@ -1,6 +1,6 @@
 """
-Tests for the spare-parts-availability stand-in (ADR-0046 §1
-`picture.spare`): config validation + loading (config.py's
+Tests for the spare-parts-availability stand-in (ADR-0046 §4,
+the picture's spares section): config validation + loading (config.py's
 PartsAvailabilityConfig / _parse_parts_availability), the pure
 spare_picture helper, and HqProducer.publish_parts_availability.
 

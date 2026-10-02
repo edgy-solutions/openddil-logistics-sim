@@ -119,7 +119,7 @@ class AssetProfile:
 class PartsAvailabilitySite:
     """One `parts_availability.sites` entry. `nearest` is the
     nearest-first distance ring for this site, used later by the
-    maintenance-event builder (ADR-0046 §1 `picture.spare`) to find
+    event assembler (ADR-0046 §4, the picture's spares section) to find
     "nearest site with stock" -- see `spare_picture` below.
 
     `nation` is None when the site has no nation configured. Unlike
@@ -145,8 +145,8 @@ class PartsAvailabilityPart:
 
 @dataclasses.dataclass(frozen=True)
 class PartsAvailabilityConfig:
-    """Spare-parts-availability stand-in config (ADR-0046 §1
-    `picture.spare`). Stock is static configuration, not a simulation
+    """Spare-parts-availability stand-in config (ADR-0046 §4,
+    the picture's spares section). Stock is static configuration, not a simulation
     of consumption -- see publisher.py's publish_parts_availability
     docstring."""
     topic: str
@@ -162,8 +162,8 @@ def spare_picture(
     sites: dict[str, PartsAvailabilitySite],
 ) -> dict[str, Any]:
     """Pure "on hand here / nearest site with stock" lookup (ADR-0046
-    §1 `picture.spare`). Nothing calls this yet -- the maintenance-
-    event builder will.
+    §4, the picture's spares section). Nothing calls this yet -- the
+    event assembler will.
 
     `availability` maps part_ref -> {site: on_hand} (e.g.
     `{p.part_ref: p.on_hand for p in cfg.parts}`); `sites` is
@@ -300,7 +300,7 @@ class SimConfig:
     releasability_path: str
     site_nation: str
 
-    # Spare-parts-availability stand-in (ADR-0046 §1 `picture.spare`).
+    # Spare-parts-availability stand-in (ADR-0046 §4, the picture's spares section).
     # Validated at load time -- see _parse_parts_availability. Absent
     # `parts_availability:` block loads to empty sites/parts (nothing
     # published, not an error); a PRESENT block with a bad reference

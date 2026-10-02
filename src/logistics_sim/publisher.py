@@ -62,7 +62,7 @@ a real empty list are indistinguishable on the wire otherwise.
 
 HqProducer also publishes a THIRD, unrelated envelope:
 publish_parts_availability -- the spare-parts-availability stand-in
-(ADR-0046 §1 `picture.spare`), one record per (site, part), to its
+(ADR-0046 §4, the picture's spares section), one record per (site, part), to its
 own topic (`PartsAvailabilityConfig.topic`, NOT `self._topic`). Unlike
 the two envelopes above, its label keys are always present
 (`originator_nation` possibly `null`, `releasable_to` always `[]`) --
@@ -300,17 +300,17 @@ class HqProducer:
         return published
 
     async def publish_parts_availability(self, cfg: PartsAvailabilityConfig) -> int:
-        """Spare-parts-availability stand-in (ADR-0046 §1
-        `picture.spare`): one Kafka record per (site, part) in
+        """Spare-parts-availability stand-in (ADR-0046 §4,
+        the picture's spares section): one Kafka record per (site, part) in
         `cfg.sites` x `cfg.parts`, published to `cfg.topic` (NOT
         `self._topic` -- parts-availability is a separate topic from
         the per-asset element-telemetry/inventory this class otherwise
         publishes, sharing only the underlying producer connection).
 
         Stock is static configuration here, not a simulation of
-        consumption -- the record exists so a maintenance event can
+        consumption -- the record exists so an assembled event can
         say "on hand here / nearest site with stock" (see
-        `config.spare_picture`, uncalled until the event builder
+        `config.spare_picture`, uncalled until the event assembler
         lands).
 
         Modeled on publish_inventory: non-fatal per-message failures
