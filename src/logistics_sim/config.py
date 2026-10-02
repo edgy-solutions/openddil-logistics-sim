@@ -137,10 +137,20 @@ class PartsAvailabilityPart:
     """One `parts_availability.parts[]` entry. `on_hand` maps site id
     -> static on-hand quantity for this part. Only sites the YAML
     named for this part are keys; a site this part doesn't mention
-    has no configured stock (treated as 0 by publishers/helpers)."""
+    has no configured stock (treated as 0 by publishers/helpers).
+
+    `lead_time_days` maps site id -> stand-in days-to-ship figure for
+    that site, same "only the sites named" shape as `on_hand` -- but
+    here absence is published as absence (no `lead_time_days` key on
+    the record), never defaulted to 0, since 0 is itself a real
+    figure. `source` names the system a part's figures stand in for
+    (`"stand-in"` by default); it labels every record for that part,
+    not per-site."""
     part_ref: str
     item: str
     on_hand: dict[str, int]
+    lead_time_days: dict[str, int] = dataclasses.field(default_factory=dict)
+    source: str = "stand-in"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -258,10 +268,34 @@ def _parse_parts_availability(
                 )
             on_hand[site_id] = qty
 
+        lead_time_days: dict[str, int] = {}
+        for site_id, days in (part_row.get("lead_time_days") or {}).items():
+            site_id = str(site_id)
+            if site_id not in sites:
+                raise ValueError(
+                    f"{path}: parts_availability.parts[{part_ref!r}]."
+                    f"lead_time_days references unknown site {site_id!r}"
+                )
+            # bool is an int subclass in Python -- reject it explicitly
+            # so `true`/`false` in YAML don't silently become 1/0.
+            if isinstance(days, bool) or not isinstance(days, int):
+                raise ValueError(
+                    f"{path}: parts_availability.parts[{part_ref!r}]."
+                    f"lead_time_days[{site_id!r}] is not an int ({days!r})"
+                )
+            if days < 0:
+                raise ValueError(
+                    f"{path}: parts_availability.parts[{part_ref!r}]."
+                    f"lead_time_days[{site_id!r}] is negative ({days})"
+                )
+            lead_time_days[site_id] = days
+
         parts.append(PartsAvailabilityPart(
             part_ref=part_ref,
             item=str(part_row.get("item", "")),
             on_hand=on_hand,
+            lead_time_days=lead_time_days,
+            source=str(part_row.get("source", "stand-in")),
         ))
 
     return PartsAvailabilityConfig(

@@ -196,3 +196,6 @@ parts_availability:
     - part_ref: part:array-module
       item: array module
       on_hand: {edge-01: 0, edge-02: 1, region-east: 2, hq: 4}
+      # Stand-in lead-time figures (days to ship to a requesting tier),
+      # not measurements from a real logistics system.
+      lead_time_days: {edge-01: 1, edge-02: 1, region-east: 3, hq: 7}

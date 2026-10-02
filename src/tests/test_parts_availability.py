@@ -297,3 +297,153 @@ async def test_publish_unlabelled_site_is_null_not_omitted(tmp_path: Path) -> No
     assert "originator_nation" in envelopes["edge-03"]
     assert "releasable_to" in envelopes["edge-03"]
     assert envelopes["edge-01"]["originator_nation"] == "ATL"
+
+
+# ---------------------------------------------------------------------------
+# lead_time_days
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lead_time_days_present_for_declared_site_only(tmp_path: Path) -> None:
+    """A site the part declares a lead time for gets the key on its
+    record; a site the part is silent on publishes no lead_time_days
+    key at all (never defaulted)."""
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "    edge-02: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1, edge-02: 1}",
+        "      lead_time_days: {edge-01: 3}",
+    ]
+    path = _write_config(tmp_path, lines)
+    cfg = SimConfig.load(path).parts_availability
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+
+    envelopes = {
+        json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
+    }
+    assert envelopes["edge-01"]["lead_time_days"] == 3
+    assert "lead_time_days" not in envelopes["edge-02"]
+
+
+@pytest.mark.asyncio
+async def test_lead_time_days_zero_is_published(tmp_path: Path) -> None:
+    """0 is a real figure (ship-today), not an absence -- it must be
+    published, not treated as falsy-and-omitted."""
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1}",
+        "      lead_time_days: {edge-01: 0}",
+    ]
+    path = _write_config(tmp_path, lines)
+    cfg = SimConfig.load(path).parts_availability
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+
+    envelope = json.loads(stub.sent[0][1])
+    assert "lead_time_days" in envelope
+    assert envelope["lead_time_days"] == 0
+
+
+def test_negative_lead_time_days_refused(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1}",
+        "      lead_time_days: {edge-01: -1}",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError) as excinfo:
+        SimConfig.load(path)
+    assert "part:array-module" in str(excinfo.value)
+    assert "edge-01" in str(excinfo.value)
+
+
+def test_non_int_string_lead_time_days_refused(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1}",
+        "      lead_time_days: {edge-01: abc}",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError) as excinfo:
+        SimConfig.load(path)
+    assert "part:array-module" in str(excinfo.value)
+    assert "edge-01" in str(excinfo.value)
+
+
+def test_bool_lead_time_days_refused(tmp_path: Path) -> None:
+    """A bool is not an int, even though Python's bool is technically
+    an int subclass -- `true`/`false` must be refused the same as any
+    other non-int."""
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1}",
+        "      lead_time_days: {edge-01: true}",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError) as excinfo:
+        SimConfig.load(path)
+    assert "part:array-module" in str(excinfo.value)
+    assert "edge-01" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_source_default_is_stand_in(tmp_path: Path) -> None:
+    cfg = _cfg_from_yaml(tmp_path)
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+    for _, value, _ in stub.sent:
+        assert json.loads(value)["source"] == "stand-in"
+
+
+@pytest.mark.asyncio
+async def test_configured_source_applies_to_every_record(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "    edge-02: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1, edge-02: 1}",
+        "      source: upstream-ledger",
+    ]
+    path = _write_config(tmp_path, lines)
+    cfg = SimConfig.load(path).parts_availability
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+    envelopes = [json.loads(value) for _, value, _ in stub.sent]
+    assert len(envelopes) == 2
+    for env in envelopes:
+        assert env["source"] == "upstream-ledger"
+
+
+def test_default_config_lead_time_days(tmp_path: Path) -> None:
+    """default.yaml's part:array-module carries the four stand-in
+    lead-time figures."""
+    repo_root = Path(__file__).resolve().parents[2]
+    cfg = SimConfig.load(repo_root / "config" / "default.yaml")
+    part = cfg.parts_availability.parts[0]
+    assert part.lead_time_days == {
+        "edge-01": 1, "edge-02": 1, "region-east": 3, "hq": 7,
+    }

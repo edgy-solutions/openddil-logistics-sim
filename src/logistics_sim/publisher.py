@@ -324,6 +324,13 @@ class HqProducer:
         publishes `originator_nation: null` -- same "absence is
         deliberate" posture as releasability.py, but no default tier
         under it.
+
+        `lead_time_days` is likewise only set on the record for a
+        site the part declares a figure for -- a site the part is
+        silent on gets no key, never a defaulted one (0 is itself a
+        real figure). `source` comes from the part's own config
+        (default `"stand-in"`) rather than being hardcoded, so a
+        deployment can name the real system a figure comes from.
         """
         if self._producer is None:
             raise RuntimeError(
@@ -341,8 +348,13 @@ class HqProducer:
                     "as_of": time.time_ns(),
                     "originator_nation": site_spec.nation,
                     "releasable_to": [],
-                    "source": "stand-in",
+                    "source": part.source,
                 }
+                # Only a site the part declares a figure for gets the
+                # key -- never defaulted, since 0 is itself a real
+                # lead time (see PartsAvailabilityPart docstring).
+                if site in part.lead_time_days:
+                    record["lead_time_days"] = part.lead_time_days[site]
                 payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
                 key = f"{site}:{part.part_ref}".encode("utf-8")
                 try:
