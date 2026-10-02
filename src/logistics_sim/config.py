@@ -116,6 +116,163 @@ class AssetProfile:
 
 
 @dataclasses.dataclass(frozen=True)
+class PartsAvailabilitySite:
+    """One `parts_availability.sites` entry. `nearest` is the
+    nearest-first distance ring for this site, used later by the
+    maintenance-event builder (ADR-0046 §1 `picture.spare`) to find
+    "nearest site with stock" -- see `spare_picture` below.
+
+    `nation` is None when the site has no nation configured. Unlike
+    releasability.py's `site_nation` fallback (which labels an
+    undeclared ASSET with the deployment's default nation), there is
+    no equivalent default here: a parts-availability site with no
+    configured nation stays unlabelled on the wire
+    (`originator_nation: null`), deliberately not defaulted."""
+    nation: str | None
+    nearest: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class PartsAvailabilityPart:
+    """One `parts_availability.parts[]` entry. `on_hand` maps site id
+    -> static on-hand quantity for this part. Only sites the YAML
+    named for this part are keys; a site this part doesn't mention
+    has no configured stock (treated as 0 by publishers/helpers)."""
+    part_ref: str
+    item: str
+    on_hand: dict[str, int]
+
+
+@dataclasses.dataclass(frozen=True)
+class PartsAvailabilityConfig:
+    """Spare-parts-availability stand-in config (ADR-0046 §1
+    `picture.spare`). Stock is static configuration, not a simulation
+    of consumption -- see publisher.py's publish_parts_availability
+    docstring."""
+    topic: str
+    interval_s: float
+    sites: dict[str, PartsAvailabilitySite]
+    parts: tuple[PartsAvailabilityPart, ...]
+
+
+def spare_picture(
+    site: str,
+    part_ref: str,
+    availability: dict[str, dict[str, int]],
+    sites: dict[str, PartsAvailabilitySite],
+) -> dict[str, Any]:
+    """Pure "on hand here / nearest site with stock" lookup (ADR-0046
+    §1 `picture.spare`). Nothing calls this yet -- the maintenance-
+    event builder will.
+
+    `availability` maps part_ref -> {site: on_hand} (e.g.
+    `{p.part_ref: p.on_hand for p in cfg.parts}`); `sites` is
+    `PartsAvailabilityConfig.sites`.
+
+    Walks `site`'s `nearest` ring in configured (nearest-first) order
+    and returns the first OTHER site with on_hand > 0 for `part_ref`.
+    With no stock anywhere in the ring, `nearest_site_with_stock` is
+    None (not "") and `nearest_on_hand` is 0.
+    """
+    stock_by_site = availability.get(part_ref, {})
+    on_hand_here = stock_by_site.get(site, 0)
+
+    site_spec = sites.get(site)
+    nearest_order = site_spec.nearest if site_spec is not None else ()
+
+    for candidate in nearest_order:
+        candidate_stock = stock_by_site.get(candidate, 0)
+        if candidate_stock > 0:
+            return {
+                "on_hand_here": on_hand_here,
+                "nearest_site_with_stock": candidate,
+                "nearest_on_hand": candidate_stock,
+            }
+
+    return {
+        "on_hand_here": on_hand_here,
+        "nearest_site_with_stock": None,
+        "nearest_on_hand": 0,
+    }
+
+
+def _parse_parts_availability(
+    raw: dict[str, Any], path: str | os.PathLike[str],
+) -> PartsAvailabilityConfig:
+    pa_raw = raw.get("parts_availability") or {}
+
+    # Env wins over YAML -- same convention as releasability_path /
+    # site_nation above. Only the topic and interval are env-
+    # overridable; sites/parts are deployment-shape config, not
+    # per-process wiring.
+    topic = os.environ.get(
+        "LOGISTICS_SIM_PARTS_AVAILABILITY_TOPIC",
+        str(pa_raw.get("topic", "parts-availability")),
+    )
+    interval_s = float(os.environ.get(
+        "LOGISTICS_SIM_PARTS_AVAILABILITY_INTERVAL_S",
+        str(pa_raw.get("interval_s", 60)),
+    ))
+
+    sites: dict[str, PartsAvailabilitySite] = {}
+    for site_id, site_row in (pa_raw.get("sites") or {}).items():
+        site_row = site_row or {}
+        sites[str(site_id)] = PartsAvailabilitySite(
+            nation=site_row.get("nation"),
+            nearest=tuple(str(s) for s in (site_row.get("nearest") or ())),
+        )
+
+    # `nearest` entries must reference a known site.
+    for site_id, site in sites.items():
+        for other in site.nearest:
+            if other not in sites:
+                raise ValueError(
+                    f"{path}: parts_availability.sites.{site_id}.nearest "
+                    f"references unknown site {other!r}"
+                )
+
+    seen_part_refs: set[str] = set()
+    parts: list[PartsAvailabilityPart] = []
+    for part_row in pa_raw.get("parts") or []:
+        part_ref = str(part_row["part_ref"])
+        if part_ref in seen_part_refs:
+            raise ValueError(
+                f"{path}: parts_availability.parts has duplicate "
+                f"part_ref {part_ref!r}"
+            )
+        seen_part_refs.add(part_ref)
+
+        on_hand: dict[str, int] = {}
+        for site_id, qty in (part_row.get("on_hand") or {}).items():
+            site_id = str(site_id)
+            if site_id not in sites:
+                raise ValueError(
+                    f"{path}: parts_availability.parts[{part_ref!r}]."
+                    f"on_hand references unknown site {site_id!r}"
+                )
+            qty = int(qty)
+            if qty < 0:
+                raise ValueError(
+                    f"{path}: parts_availability.parts[{part_ref!r}]."
+                    f"on_hand[{site_id!r}] is negative ({qty})"
+                )
+            on_hand[site_id] = qty
+
+        parts.append(PartsAvailabilityPart(
+            part_ref=part_ref,
+            item=str(part_row.get("item", "")),
+            on_hand=on_hand,
+        ))
+
+    return PartsAvailabilityConfig(
+        topic=topic,
+        interval_s=interval_s,
+        sites=sites,
+        parts=tuple(parts),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class SimConfig:
     tick_interval_s: float
     output_topic: str
@@ -142,6 +299,14 @@ class SimConfig:
     # nation, per releasability.py's precedence rules.
     releasability_path: str
     site_nation: str
+
+    # Spare-parts-availability stand-in (ADR-0046 §1 `picture.spare`).
+    # Validated at load time -- see _parse_parts_availability. Absent
+    # `parts_availability:` block loads to empty sites/parts (nothing
+    # published, not an error); a PRESENT block with a bad reference
+    # fails start, same "validate on load" posture as the rest of
+    # this file.
+    parts_availability: PartsAvailabilityConfig
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "SimConfig":
@@ -210,6 +375,7 @@ class SimConfig:
             consumer_group_prefix=consumer_group_prefix,
             releasability_path=releasability_path,
             site_nation=site_nation,
+            parts_availability=_parse_parts_availability(raw, path),
         )
 
     def profile_for_variant(self, platform_variant: str) -> AssetProfile | None:

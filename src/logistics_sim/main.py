@@ -8,6 +8,10 @@ Wires:
   * One tick loop that, every tick_interval_s, walks the current roster,
     routes each asset to its asset_profile by platform_variant, builds
     a synthesized snapshot, and publishes.
+  * One parts-availability loop, on its own interval_s (independent of
+    the tick loop), publishing the static spare-parts-availability
+    stand-in (ADR-0046 §1 `picture.spare`) -- see publisher.py's
+    publish_parts_availability.
 """
 from __future__ import annotations
 
@@ -172,6 +176,39 @@ async def _tick_loop(
             tick_trigger = "cadence"
 
 
+async def _parts_availability_loop(cfg: SimConfig, producer: HqProducer) -> None:
+    """Publishes the spare-parts-availability stand-in (ADR-0046 §1
+    `picture.spare`) on its OWN cadence -- independent of
+    `_tick_loop`'s per-asset interval, since stock here is static
+    configuration, not driven by discovery/roster state. Publishes
+    once immediately, then every `parts_availability.interval_s`.
+
+    Failure in one iteration is non-fatal (logged, retried next
+    interval) -- same posture as `_tick_loop`'s outer except."""
+    pa_cfg = cfg.parts_availability
+    log.info(
+        "parts-availability loop starting (interval=%.1fs, topic=%s, "
+        "sites=%d, parts=%d)",
+        pa_cfg.interval_s, pa_cfg.topic, len(pa_cfg.sites), len(pa_cfg.parts),
+    )
+    while True:
+        try:
+            published = await producer.publish_parts_availability(pa_cfg)
+            log.info(
+                "parts-availability: published %d record(s) to %s",
+                published, pa_cfg.topic,
+            )
+        except asyncio.CancelledError:
+            log.info("parts-availability loop cancelled")
+            raise
+        except Exception:
+            log.exception(
+                "parts-availability publish iteration failed; "
+                "will retry next interval"
+            )
+        await asyncio.sleep(pa_cfg.interval_s)
+
+
 def _clock() -> float:
     import time
     return time.time()
@@ -224,6 +261,9 @@ async def _serve(cfg: SimConfig) -> int:
         ))
     tasks.append(asyncio.create_task(
         _tick_loop(cfg, roster, producer), name="tick-loop",
+    ))
+    tasks.append(asyncio.create_task(
+        _parts_availability_loop(cfg, producer), name="parts-availability-loop",
     ))
 
     loop = asyncio.get_running_loop()

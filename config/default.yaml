@@ -168,3 +168,31 @@ asset_profiles:
   #       rows: 8
   #   synthesis:
   #     ...
+
+# =============================================================================
+# Spare-parts-availability stand-in (ADR-0046 §1 `picture.spare`)
+# =============================================================================
+# Publishes one parts-availability record per (site, part) on start and
+# then every interval_s. Stock is static configuration here, not a
+# simulation of consumption -- it exists so a maintenance event can say
+# "on hand here / nearest site with stock". See publisher.py's
+# publish_parts_availability and config.spare_picture.
+#
+# `sites[].nearest` is the nearest-first distance ring for that site
+# (order matters -- it is walked in order by spare_picture). `nation`
+# labels that site's records; a site with no nation configured
+# publishes with originator_nation: null, releasable_to: [] -- NOT
+# defaulted (see config.PartsAvailabilitySite's docstring for why this
+# does not reuse releasability.py's site_nation fallback).
+parts_availability:
+  topic: parts-availability
+  interval_s: 60
+  sites:
+    edge-01: {nation: ATL, nearest: [region-east, edge-02, hq]}
+    edge-02: {nation: BDR, nearest: [region-east, edge-01, hq]}
+    region-east: {nation: ATL, nearest: [edge-01, edge-02, hq]}
+    hq: {nation: ATL, nearest: [region-east, edge-01, edge-02]}
+  parts:
+    - part_ref: part:array-module
+      item: array module
+      on_hand: {edge-01: 0, edge-02: 1, region-east: 2, hq: 4}

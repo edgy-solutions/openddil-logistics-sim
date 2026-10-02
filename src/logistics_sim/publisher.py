@@ -59,6 +59,15 @@ asset. Absence of both keys -- not `""`/`null`/`[]` -- is how an
 unlabelled asset is distinguished from a labelled-but-not-released-
 to-anyone asset ("releasable_to": []), since a placeholder value and
 a real empty list are indistinguishable on the wire otherwise.
+
+HqProducer also publishes a THIRD, unrelated envelope:
+publish_parts_availability -- the spare-parts-availability stand-in
+(ADR-0046 §1 `picture.spare`), one record per (site, part), to its
+own topic (`PartsAvailabilityConfig.topic`, NOT `self._topic`). Unlike
+the two envelopes above, its label keys are always present
+(`originator_nation` possibly `null`, `releasable_to` always `[]`) --
+see that method's docstring for why it does not reuse
+ReleasabilityDeclaration's omit-the-keys convention.
 """
 from __future__ import annotations
 
@@ -69,6 +78,7 @@ import time
 
 from aiokafka import AIOKafkaProducer
 
+from .config import PartsAvailabilityConfig
 from .element_gen import AssetState, ElementTelemetry
 from .releasability import ReleasabilityDeclaration
 
@@ -287,4 +297,62 @@ class HqProducer:
                 self._inventory_topic, value=payload, key=key,
             )
             published += 1
+        return published
+
+    async def publish_parts_availability(self, cfg: PartsAvailabilityConfig) -> int:
+        """Spare-parts-availability stand-in (ADR-0046 §1
+        `picture.spare`): one Kafka record per (site, part) in
+        `cfg.sites` x `cfg.parts`, published to `cfg.topic` (NOT
+        `self._topic` -- parts-availability is a separate topic from
+        the per-asset element-telemetry/inventory this class otherwise
+        publishes, sharing only the underlying producer connection).
+
+        Stock is static configuration here, not a simulation of
+        consumption -- the record exists so a maintenance event can
+        say "on hand here / nearest site with stock" (see
+        `config.spare_picture`, uncalled until the event builder
+        lands).
+
+        Modeled on publish_inventory: non-fatal per-message failures
+        (logged, not raised) so one bad send doesn't blank the rest of
+        the sweep. Returns the count of records actually sent.
+
+        Labeling deliberately does NOT reuse ReleasabilityDeclaration
+        (that resolves per-ASSET labels with a site_nation fallback
+        tier). Here the label is the queried SITE's own configured
+        nation, with no fallback: a site with no nation configured
+        publishes `originator_nation: null` -- same "absence is
+        deliberate" posture as releasability.py, but no default tier
+        under it.
+        """
+        if self._producer is None:
+            raise RuntimeError(
+                "HqProducer.publish_parts_availability called before start()"
+            )
+
+        published = 0
+        for site, site_spec in cfg.sites.items():
+            for part in cfg.parts:
+                record = {
+                    "site": site,
+                    "part_ref": part.part_ref,
+                    "item": part.item,
+                    "on_hand": part.on_hand.get(site, 0),
+                    "as_of": time.time_ns(),
+                    "originator_nation": site_spec.nation,
+                    "releasable_to": [],
+                    "source": "stand-in",
+                }
+                payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
+                key = f"{site}:{part.part_ref}".encode("utf-8")
+                try:
+                    await self._producer.send_and_wait(
+                        cfg.topic, value=payload, key=key,
+                    )
+                    published += 1
+                except Exception:
+                    log.exception(
+                        "parts-availability publish failed for %s/%s; "
+                        "skipping this record", site, part.part_ref,
+                    )
         return published
