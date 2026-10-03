@@ -78,7 +78,7 @@ import time
 
 from aiokafka import AIOKafkaProducer
 
-from .config import PartsAvailabilityConfig
+from .config import PartsAvailabilityConfig, spare_picture
 from .element_gen import AssetState, ElementTelemetry
 from .releasability import ReleasabilityDeclaration
 
@@ -308,10 +308,11 @@ class HqProducer:
         publishes, sharing only the underlying producer connection).
 
         Stock is static configuration here, not a simulation of
-        consumption -- the record exists so an assembled event can
-        say "on hand here / nearest site with stock" (see
-        `config.spare_picture`, uncalled until the event assembler
-        lands).
+        consumption -- each record carries "nearest site with stock"
+        via `config.spare_picture`, built once per sweep over the full
+        part_ref -> {site: on_hand} picture (`cfg.parts`), so every
+        record's ring answer is computed against every other site's
+        on hand, not just its own.
 
         Modeled on publish_inventory: non-fatal per-message failures
         (logged, not raised) so one bad send doesn't blank the rest of
@@ -337,9 +338,12 @@ class HqProducer:
                 "HqProducer.publish_parts_availability called before start()"
             )
 
+        availability = {p.part_ref: p.on_hand for p in cfg.parts}
+
         published = 0
         for site, site_spec in cfg.sites.items():
             for part in cfg.parts:
+                picture = spare_picture(site, part.part_ref, availability, cfg.sites)
                 record = {
                     "site": site,
                     "part_ref": part.part_ref,
@@ -349,6 +353,8 @@ class HqProducer:
                     "originator_nation": site_spec.nation,
                     "releasable_to": [],
                     "source": part.source,
+                    "nearest_site_with_stock": picture["nearest_site_with_stock"],
+                    "nearest_on_hand": picture["nearest_on_hand"],
                 }
                 # Only a site the part declares a figure for gets the
                 # key -- never defaulted, since 0 is itself a real

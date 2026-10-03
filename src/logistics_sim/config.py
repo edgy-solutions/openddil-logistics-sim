@@ -172,8 +172,11 @@ def spare_picture(
     sites: dict[str, PartsAvailabilitySite],
 ) -> dict[str, Any]:
     """Pure "on hand here / nearest site with stock" lookup (ADR-0046
-    §4, the picture's spares section). Nothing calls this yet -- the
-    event assembler will.
+    §4, the picture's spares section). Called by
+    `publisher.HqProducer.publish_parts_availability`, once per
+    (site, part) record; the egress assembler reads the resulting
+    `nearest_site_with_stock` / `nearest_on_hand` fields off the wire
+    record rather than calling this itself.
 
     `availability` maps part_ref -> {site: on_hand} (e.g.
     `{p.part_ref: p.on_hand for p in cfg.parts}`); `sites` is

@@ -447,3 +447,56 @@ def test_default_config_lead_time_days(tmp_path: Path) -> None:
     assert part.lead_time_days == {
         "edge-01": 1, "edge-02": 1, "region-east": 3, "hq": 7,
     }
+
+
+# ---------------------------------------------------------------------------
+# published record carries the ring answer (spare_picture wired in)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_published_record_carries_ring_answer(tmp_path: Path) -> None:
+    """Each published (site, part) record carries
+    nearest_site_with_stock / nearest_on_hand from config.spare_picture,
+    built over the full cross-site on_hand picture -- not just this
+    record's own site."""
+    cfg = _cfg_from_yaml(tmp_path)
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+
+    envelopes = {
+        json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
+    }
+    # edge-01 has 0 on hand; its ring is [region-east, edge-02, hq] --
+    # region-east (2) is the first with stock.
+    assert envelopes["edge-01"]["nearest_site_with_stock"] == "region-east"
+    assert envelopes["edge-01"]["nearest_on_hand"] == 2
+    # hq has stock itself (4), but nearest_site_with_stock still names
+    # the first OTHER site in hq's ring with stock, not hq itself.
+    assert envelopes["hq"]["nearest_site_with_stock"] == "region-east"
+    assert envelopes["hq"]["nearest_on_hand"] == 2
+
+
+@pytest.mark.asyncio
+async def test_published_record_no_stock_anywhere_is_null_and_zero(
+    tmp_path: Path,
+) -> None:
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: [edge-02]}",
+        "    edge-02: {nation: ATL, nearest: [edge-01]}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 0, edge-02: 0}",
+    ]
+    path = _write_config(tmp_path, lines)
+    cfg = SimConfig.load(path).parts_availability
+    producer, stub = _make_producer()
+    await producer.publish_parts_availability(cfg)
+
+    envelopes = {
+        json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
+    }
+    for env in envelopes.values():
+        assert env["nearest_site_with_stock"] is None
+        assert env["nearest_on_hand"] == 0
