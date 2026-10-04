@@ -1,0 +1,4 @@
+# ADR-0047 exceptions, one per line, tab-separated: <path>	<substring on the line>	<reason>
+# The allowlist only shrinks: an entry that matches nothing fails the check.
+config/default.yaml	assetId.endsWith('_Sensor')	pending: phase 2, goes with the suffix filter below
+src/logistics_sim/asset_discovery.py	asset_id.endswith(required_suffix)	pending: phase 2, discover element-bearing assets by platform_variant
