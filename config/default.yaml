@@ -178,12 +178,18 @@ asset_profiles:
 # "on hand here / nearest site with stock". See publisher.py's
 # publish_parts_availability and config.spare_picture.
 #
+# Published records follow the Contract B "parts" plane: labels live
+# under `provenance` (`originator_nation`, `releasable_to`), the sweep
+# timestamp is `observed_at_ns` (not `as_of`), and every record carries
+# an `extraction` block (`cursor`, `extracted_at_ns`).
+#
 # `sites[].nearest` is the nearest-first distance ring for that site
 # (order matters -- it is walked in order by spare_picture). `nation`
 # labels that site's records; a site with no nation configured
-# publishes with originator_nation: null, releasable_to: [] -- NOT
-# defaulted (see config.PartsAvailabilitySite's docstring for why this
-# does not reuse releasability.py's site_nation fallback).
+# publishes with provenance.originator_nation: null,
+# provenance.releasable_to: [] -- NOT defaulted (see
+# config.PartsAvailabilitySite's docstring for why this does not reuse
+# releasability.py's site_nation fallback).
 parts_availability:
   topic: parts-availability
   interval_s: 60

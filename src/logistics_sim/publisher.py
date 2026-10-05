@@ -307,12 +307,29 @@ class HqProducer:
         the per-asset element-telemetry/inventory this class otherwise
         publishes, sharing only the underlying producer connection).
 
+        The record follows the Contract B "parts" plane: `observed_at_ns`
+        (not `as_of`) is the sweep's own timestamp, taken ONCE per call
+        so every record in the sweep carries the identical value; labels
+        live under `provenance` (`originator_nation`, `releasable_to`),
+        never at the top level; and an `extraction` block
+        (`cursor`, `extracted_at_ns`) is stamped on every record, with
+        `cursor` derived from the sweep timestamp so it is monotone
+        across restarts.
+
         Stock is static configuration here, not a simulation of
         consumption -- each record carries "nearest site with stock"
         via `config.spare_picture`, built once per sweep over the full
         part_ref -> {site: on_hand} picture (`cfg.parts`), so every
         record's ring answer is computed against every other site's
-        on hand, not just its own.
+        on hand, not just its own. `nearest_on_hand` is only set when
+        there IS a nearest site with stock -- with no stock anywhere in
+        the ring the key is omitted entirely (never a fabricated 0).
+
+        A site a part's `on_hand` map does not name at all gets NO
+        record for that (site, part) -- unknown stock is not the same
+        claim as zero stock, so nothing is fabricated on the wire.
+        `spare_picture`'s nearest walk still treats a missing site as
+        having no stock when computing OTHER sites' ring answers.
 
         Modeled on publish_inventory: non-fatal per-message failures
         (logged, not raised) so one bad send doesn't blank the rest of
@@ -322,9 +339,9 @@ class HqProducer:
         (that resolves per-ASSET labels with a site_nation fallback
         tier). Here the label is the queried SITE's own configured
         nation, with no fallback: a site with no nation configured
-        publishes `originator_nation: null` -- same "absence is
-        deliberate" posture as releasability.py, but no default tier
-        under it.
+        publishes `provenance.originator_nation: null` -- same
+        "absence is deliberate" posture as releasability.py, but no
+        default tier under it.
 
         `lead_time_days` is likewise only set on the record for a
         site the part declares a figure for -- a site the part is
@@ -338,24 +355,42 @@ class HqProducer:
                 "HqProducer.publish_parts_availability called before start()"
             )
 
+        # Taken ONCE per call -- every record in this sweep carries the
+        # identical observed_at_ns/extracted_at_ns/cursor, not a
+        # per-record timestamp.
+        sweep_ns = time.time_ns()
         availability = {p.part_ref: p.on_hand for p in cfg.parts}
 
         published = 0
         for site, site_spec in cfg.sites.items():
             for part in cfg.parts:
+                if site not in part.on_hand:
+                    # Unknown is not zero -- no record for a site the
+                    # part's on_hand map is silent on.
+                    continue
                 picture = spare_picture(site, part.part_ref, availability, cfg.sites)
                 record = {
                     "site": site,
                     "part_ref": part.part_ref,
                     "item": part.item,
-                    "on_hand": part.on_hand.get(site, 0),
-                    "as_of": time.time_ns(),
-                    "originator_nation": site_spec.nation,
-                    "releasable_to": [],
+                    "on_hand": part.on_hand[site],
+                    "observed_at_ns": sweep_ns,
+                    "provenance": {
+                        "originator_nation": site_spec.nation,
+                        "releasable_to": [],
+                    },
+                    "extraction": {
+                        "cursor": f"sweep-{sweep_ns}",
+                        "extracted_at_ns": sweep_ns,
+                    },
                     "source": part.source,
                     "nearest_site_with_stock": picture["nearest_site_with_stock"],
-                    "nearest_on_hand": picture["nearest_on_hand"],
                 }
+                # Omitted (not 0) when there's no nearest site with
+                # stock -- a fabricated zero would be indistinguishable
+                # from a real "0 units at the nearest site".
+                if picture["nearest_site_with_stock"] is not None:
+                    record["nearest_on_hand"] = picture["nearest_on_hand"]
                 # Only a site the part declares a figure for gets the
                 # key -- never defaulted, since 0 is itself a real
                 # lead time (see PartsAvailabilityPart docstring).

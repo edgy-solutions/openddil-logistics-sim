@@ -250,16 +250,27 @@ async def test_publish_one_record_per_site_and_part(tmp_path: Path) -> None:
     envelopes = {
         json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
     }
-    assert envelopes["edge-01"]["originator_nation"] == "ATL"
-    assert envelopes["edge-02"]["originator_nation"] == "BDR"
-    assert envelopes["hq"]["originator_nation"] == "ATL"
-    assert envelopes["region-east"]["originator_nation"] == "ATL"
+    assert envelopes["edge-01"]["provenance"]["originator_nation"] == "ATL"
+    assert envelopes["edge-02"]["provenance"]["originator_nation"] == "BDR"
+    assert envelopes["hq"]["provenance"]["originator_nation"] == "ATL"
+    assert envelopes["region-east"]["provenance"]["originator_nation"] == "ATL"
+    observed_values = set()
     for env in envelopes.values():
-        assert env["releasable_to"] == []
+        assert env["provenance"]["releasable_to"] == []
+        assert "originator_nation" not in env
+        assert "releasable_to" not in env
         assert env["source"] == "stand-in"
         assert env["part_ref"] == "part:array-module"
         assert env["item"] == "array module"
-        assert isinstance(env["as_of"], int)
+        assert "as_of" not in env
+        assert isinstance(env["observed_at_ns"], int)
+        observed_values.add(env["observed_at_ns"])
+        assert env["extraction"]["cursor"] == f"sweep-{env['observed_at_ns']}"
+        assert isinstance(env["extraction"]["cursor"], str) and env["extraction"]["cursor"]
+        assert env["extraction"]["extracted_at_ns"] >= env["observed_at_ns"]
+    # every record in the sweep carries the SAME observed_at_ns -- it is
+    # taken once per call, not per record.
+    assert len(observed_values) == 1
     assert envelopes["edge-01"]["on_hand"] == 0
     assert envelopes["edge-02"]["on_hand"] == 1
     assert envelopes["region-east"]["on_hand"] == 2
@@ -292,11 +303,11 @@ async def test_publish_unlabelled_site_is_null_not_omitted(tmp_path: Path) -> No
     envelopes = {
         json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
     }
-    assert envelopes["edge-03"]["originator_nation"] is None
-    assert envelopes["edge-03"]["releasable_to"] == []
-    assert "originator_nation" in envelopes["edge-03"]
-    assert "releasable_to" in envelopes["edge-03"]
-    assert envelopes["edge-01"]["originator_nation"] == "ATL"
+    assert envelopes["edge-03"]["provenance"]["originator_nation"] is None
+    assert envelopes["edge-03"]["provenance"]["releasable_to"] == []
+    assert "originator_nation" in envelopes["edge-03"]["provenance"]
+    assert "releasable_to" in envelopes["edge-03"]["provenance"]
+    assert envelopes["edge-01"]["provenance"]["originator_nation"] == "ATL"
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +485,8 @@ async def test_published_record_carries_ring_answer(tmp_path: Path) -> None:
     # the first OTHER site in hq's ring with stock, not hq itself.
     assert envelopes["hq"]["nearest_site_with_stock"] == "region-east"
     assert envelopes["hq"]["nearest_on_hand"] == 2
+    for env in envelopes.values():
+        assert "nearest_on_hand" in env
 
 
 @pytest.mark.asyncio
@@ -499,4 +512,34 @@ async def test_published_record_no_stock_anywhere_is_null_and_zero(
     }
     for env in envelopes.values():
         assert env["nearest_site_with_stock"] is None
-        assert env["nearest_on_hand"] == 0
+        # `nearest_on_hand` is OMITTED (not 0) when there's no stock
+        # anywhere in the ring -- a fabricated zero would be
+        # indistinguishable from a real "0 units at the nearest site".
+        assert "nearest_on_hand" not in env
+
+
+@pytest.mark.asyncio
+async def test_site_missing_from_on_hand_map_gets_no_record(
+    tmp_path: Path,
+) -> None:
+    """A site the part's `on_hand` map does not name at all gets NO
+    record for that (site, part) -- unknown is not zero. This is
+    different from a site explicitly declared with `on_hand: 0`
+    (covered by test_publish_one_record_per_site_and_part's edge-01),
+    which still publishes."""
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "    edge-02: {nation: ATL, nearest: []}",
+        "  parts:",
+        "    - part_ref: part:array-module",
+        "      item: array module",
+        "      on_hand: {edge-01: 1}",
+    ]
+    path = _write_config(tmp_path, lines)
+    cfg = SimConfig.load(path).parts_availability
+    producer, stub = _make_producer()
+    published = await producer.publish_parts_availability(cfg)
+    assert published == 1
+    sites_seen = {json.loads(value)["site"] for _, value, _ in stub.sent}
+    assert sites_seen == {"edge-01"}
