@@ -122,13 +122,15 @@ class PartsAvailabilitySite:
     event assembler (ADR-0046 §4, the picture's spares section) to find
     "nearest site with stock" -- see `spare_picture` below.
 
-    `nation` is None when the site has no nation configured. Unlike
-    releasability.py's `site_nation` fallback (which labels an
-    undeclared ASSET with the deployment's default nation), there is
-    no equivalent default here: a parts-availability site with no
-    configured nation stays unlabelled on the wire
-    (`originator_nation: null`), deliberately not defaulted."""
-    nation: str | None
+    `nation` is always a real, non-blank value: there is no default
+    nation here (unlike releasability.py's `site_nation` fallback,
+    which labels an undeclared ASSET with the deployment's default
+    nation). A site with no nation configured has no releasability
+    label, and a consumer must refuse an unlabelled record
+    (`label_absent`) rather than publish one -- so
+    `_parse_parts_availability` refuses the whole config at load
+    instead of letting an unlabelled site reach the wire."""
+    nation: str
     nearest: tuple[str, ...]
 
 
@@ -228,11 +230,32 @@ def _parse_parts_availability(
     ))
 
     sites: dict[str, PartsAvailabilitySite] = {}
+    unlabelled_sites: list[str] = []
     for site_id, site_row in (pa_raw.get("sites") or {}).items():
         site_row = site_row or {}
-        sites[str(site_id)] = PartsAvailabilitySite(
-            nation=site_row.get("nation"),
+        site_id = str(site_id)
+        nation = site_row.get("nation")
+        if nation is None or not str(nation).strip():
+            unlabelled_sites.append(site_id)
+            continue
+        sites[site_id] = PartsAvailabilitySite(
+            nation=str(nation),
             nearest=tuple(str(s) for s in (site_row.get("nearest") or ())),
+        )
+
+    # A site with no nation has no releasability label -- refuse the
+    # whole config at load rather than let an unlabelled site reach
+    # the wire. Reported together (sorted), not just the first, so
+    # one load tells the whole story.
+    if unlabelled_sites:
+        named = ", ".join(
+            f"parts_availability.sites.{s}.nation"
+            for s in sorted(unlabelled_sites)
+        )
+        raise ValueError(
+            f"{path}: {named}: nation is required "
+            "(a site with no nation has no releasability label; "
+            "refusing to start)"
         )
 
     # `nearest` entries must reference a known site.

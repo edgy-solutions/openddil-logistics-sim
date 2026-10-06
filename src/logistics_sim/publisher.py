@@ -65,7 +65,7 @@ publish_parts_availability -- the spare-parts-availability stand-in
 (ADR-0046 §4, the picture's spares section), one record per (site, part), to its
 own topic (`PartsAvailabilityConfig.topic`, NOT `self._topic`). Unlike
 the two envelopes above, its label keys are always present
-(`originator_nation` possibly `null`, `releasable_to` always `[]`) --
+(`originator_nation` a real nation, `releasable_to` always `[]`) --
 see that method's docstring for why it does not reuse
 ReleasabilityDeclaration's omit-the-keys convention.
 """
@@ -338,10 +338,10 @@ class HqProducer:
         Labeling deliberately does NOT reuse ReleasabilityDeclaration
         (that resolves per-ASSET labels with a site_nation fallback
         tier). Here the label is the queried SITE's own configured
-        nation, with no fallback: a site with no nation configured
-        publishes `provenance.originator_nation: null` -- same
-        "absence is deliberate" posture as releasability.py, but no
-        default tier under it.
+        nation, with no fallback: `_parse_parts_availability` refuses
+        the config at load if any site has no nation configured, so
+        every site reaching this method already has a real nation --
+        there is no unlabelled-site case left to handle here.
 
         `lead_time_days` is likewise only set on the record for a
         site the part declares a figure for -- a site the part is

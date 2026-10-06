@@ -7,8 +7,8 @@ spare_picture helper, and HqProducer.publish_parts_availability.
 Stock is static configuration, not a simulation of consumption -- see
 publisher.py's publish_parts_availability docstring. Label precedence
 intentionally does NOT reuse ReleasabilityDeclaration's site_nation
-fallback: a site with no nation configured stays unlabelled
-(originator_nation: null), never defaulted.
+fallback: a site with no nation configured has no releasability label
+and is refused at load, rather than defaulted or published unlabelled.
 """
 from __future__ import annotations
 
@@ -102,6 +102,72 @@ def test_unknown_site_in_nearest_refused(tmp_path: Path) -> None:
     path = _write_config(tmp_path, lines)
     with pytest.raises(ValueError, match="unknown site"):
         SimConfig.load(path)
+
+
+def test_site_with_no_nation_key_refused(tmp_path: Path) -> None:
+    """A site with no `nation` key at all has no releasability label
+    and is refused at load, naming that site."""
+    lines = [
+        "  sites:",
+        "    edge-01: {nation: ATL, nearest: []}",
+        "    edge-03: {nearest: []}",  # no nation configured
+        "  parts: []",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError, match=r"edge-03.*nation is required"):
+        SimConfig.load(path)
+
+
+def test_site_with_null_nation_refused(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-03: {nation: null, nearest: []}",
+        "  parts: []",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError, match=r"edge-03.*nation is required"):
+        SimConfig.load(path)
+
+
+def test_site_with_empty_string_nation_refused(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-03: {nation: '', nearest: []}",
+        "  parts: []",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError, match=r"edge-03.*nation is required"):
+        SimConfig.load(path)
+
+
+def test_site_with_whitespace_only_nation_refused(tmp_path: Path) -> None:
+    lines = [
+        "  sites:",
+        "    edge-03: {nation: '  ', nearest: []}",
+        "  parts: []",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError, match=r"edge-03.*nation is required"):
+        SimConfig.load(path)
+
+
+def test_two_unlabelled_sites_both_named_in_one_error(tmp_path: Path) -> None:
+    """Both unlabelled sites are named in the single raised error, not
+    just the first one encountered -- and in sorted order."""
+    lines = [
+        "  sites:",
+        "    edge-03: {nearest: []}",  # no nation configured
+        "    edge-04: {nation: '', nearest: []}",  # blank nation
+        "  parts: []",
+    ]
+    path = _write_config(tmp_path, lines)
+    with pytest.raises(ValueError) as excinfo:
+        SimConfig.load(path)
+    message = str(excinfo.value)
+    assert "edge-03" in message
+    assert "edge-04" in message
+    # sorted: edge-03 appears before edge-04 in the message.
+    assert message.index("edge-03") < message.index("edge-04")
 
 
 def test_unknown_site_in_on_hand_refused(tmp_path: Path) -> None:
@@ -279,35 +345,25 @@ async def test_publish_one_record_per_site_and_part(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_unlabelled_site_is_null_not_omitted(tmp_path: Path) -> None:
-    """A site with no nation configured publishes originator_nation:
-    null / releasable_to: [] -- the fields are PRESENT with those
-    values, not omitted (unlike the per-asset telemetry envelopes in
-    publisher.py, which omit the keys entirely for an unlabelled
-    asset)."""
-    lines = [
-        "  sites:",
-        "    edge-01: {nation: ATL, nearest: []}",
-        "    edge-03: {nearest: []}",  # no nation configured
-        "  parts:",
-        "    - part_ref: part:array-module",
-        "      item: array module",
-        "      on_hand: {edge-01: 1, edge-03: 0}",
-    ]
-    path = _write_config(tmp_path, lines)
-    cfg = SimConfig.load(path).parts_availability
+async def test_publish_labelled_site_releasable_to_empty_is_originator_only(
+    tmp_path: Path,
+) -> None:
+    """A labelled site (real `nation`) with `releasable_to: []` on the
+    wire is legal and unchanged -- originator-only, not unlabelled.
+    Every site in `_VALID_PA_LINES` is labelled, so this is the
+    originator-only case, not the (now load-refused) unlabelled one."""
+    cfg = _cfg_from_yaml(tmp_path)
     producer, stub = _make_producer()
     published = await producer.publish_parts_availability(cfg)
-    assert published == 2
+    assert published == 4
 
     envelopes = {
         json.loads(value)["site"]: json.loads(value) for _, value, _ in stub.sent
     }
-    assert envelopes["edge-03"]["provenance"]["originator_nation"] is None
-    assert envelopes["edge-03"]["provenance"]["releasable_to"] == []
-    assert "originator_nation" in envelopes["edge-03"]["provenance"]
-    assert "releasable_to" in envelopes["edge-03"]["provenance"]
-    assert envelopes["edge-01"]["provenance"]["originator_nation"] == "ATL"
+    for env in envelopes.values():
+        assert env["provenance"]["releasable_to"] == []
+        assert isinstance(env["provenance"]["originator_nation"], str)
+        assert env["provenance"]["originator_nation"]
 
 
 # ---------------------------------------------------------------------------

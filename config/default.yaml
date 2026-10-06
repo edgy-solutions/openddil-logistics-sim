@@ -185,11 +185,11 @@ asset_profiles:
 #
 # `sites[].nearest` is the nearest-first distance ring for that site
 # (order matters -- it is walked in order by spare_picture). `nation`
-# labels that site's records; a site with no nation configured
-# publishes with provenance.originator_nation: null,
-# provenance.releasable_to: [] -- NOT defaulted (see
-# config.PartsAvailabilitySite's docstring for why this does not reuse
-# releasability.py's site_nation fallback).
+# labels that site's records; a site with no nation configured has no
+# releasability label and is refused at startup (see
+# config.PartsAvailabilitySite's docstring and
+# config._parse_parts_availability for why this does not default or
+# reuse releasability.py's site_nation fallback).
 parts_availability:
   topic: parts-availability
   interval_s: 60
