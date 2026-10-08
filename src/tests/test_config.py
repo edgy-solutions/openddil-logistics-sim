@@ -116,11 +116,11 @@ def test_loader_partial_per_tier_uses_defaults_for_unset(tmp_path: Path) -> None
     assert s.failed_yellow_fraction   == 0.30
 
 
-def _write_profile_with_suffix(
-    tmp_path: Path, suffix: str | None,
+def _write_profile_with_key(
+    tmp_path: Path, key: str | None, value: str = "ASSET_SUBSYSTEM_SENSOR",
 ) -> Path:
-    """Build a minimal config with the given match_asset_id_suffix
-    on the single profile. None -> field absent from YAML."""
+    """Build a minimal config with `key: value` on the single profile.
+    None -> no filter key in YAML."""
     lines = [
         "tick_interval_s: 30",
         "output_topic: asset-element-telemetry",
@@ -128,8 +128,8 @@ def _write_profile_with_suffix(
         "  - name: mrad",
         '    matches_platform_variants: ["MRAD_Sensor"]',
     ]
-    if suffix is not None:
-        lines.append(f'    match_asset_id_suffix: "{suffix}"')
+    if key is not None:
+        lines.append(f'    {key}: "{value}"')
     lines += [
         "    layers:",
         "      - name: RADAR UNIT",
@@ -143,40 +143,47 @@ def _write_profile_with_suffix(
         "      health_nominal_max: 0.85",
         "      degraded_fraction: 0.15",
     ]
-    f = tmp_path / "suffix_config.yaml"
+    f = tmp_path / "subsystem_config.yaml"
     f.write_text("\n".join(lines) + "\n")
     return f
 
 
-def test_match_asset_id_suffix_loaded_when_present(tmp_path: Path) -> None:
-    yaml = _write_profile_with_suffix(tmp_path, "_Sensor")
+def test_match_subsystem_loaded_when_present(tmp_path: Path) -> None:
+    yaml = _write_profile_with_key(tmp_path, "match_subsystem")
     cfg = SimConfig.load(yaml)
-    assert cfg.profiles[0].match_asset_id_suffix == "_Sensor"
+    assert cfg.profiles[0].match_subsystem == "ASSET_SUBSYSTEM_SENSOR"
 
 
-def test_match_asset_id_suffix_defaults_to_empty_when_absent(tmp_path: Path) -> None:
-    """No `match_asset_id_suffix:` line in YAML -> empty string ->
-    suffix filter disabled in discovery (variant-only matching).
-    Preserves the pre-2026-06-29 behavior for old configs."""
-    yaml = _write_profile_with_suffix(tmp_path, None)
+def test_match_subsystem_defaults_to_empty_when_absent(tmp_path: Path) -> None:
+    """No `match_subsystem:` line in YAML -> empty string -> filter
+    disabled in discovery (variant-only matching)."""
+    yaml = _write_profile_with_key(tmp_path, None)
     cfg = SimConfig.load(yaml)
-    assert cfg.profiles[0].match_asset_id_suffix == ""
+    assert cfg.profiles[0].match_subsystem == ""
 
 
-def test_variant_suffix_map_emits_per_variant_suffix(tmp_path: Path) -> None:
-    """SimConfig.variant_suffix_map keys = union of every profile's
-    matches list; values = that profile's match_asset_id_suffix."""
-    yaml = _write_profile_with_suffix(tmp_path, "_Sensor")
+def test_old_suffix_key_fails_load(tmp_path: Path) -> None:
+    """The retired asset_id-suffix key must fail loudly, naming the
+    replacement, rather than be silently ignored."""
+    yaml = _write_profile_with_key(tmp_path, "match_asset_id_suffix", "_Sensor")
+    with pytest.raises(ValueError, match="match_subsystem"):
+        SimConfig.load(yaml)
+
+
+def test_variant_subsystem_map_emits_per_variant_subsystem(tmp_path: Path) -> None:
+    """SimConfig.variant_subsystem_map keys = union of every profile's
+    matches list; values = that profile's match_subsystem."""
+    yaml = _write_profile_with_key(tmp_path, "match_subsystem")
     cfg = SimConfig.load(yaml)
-    assert cfg.variant_suffix_map == {"MRAD_Sensor": "_Sensor"}
+    assert cfg.variant_subsystem_map == {"MRAD_Sensor": "ASSET_SUBSYSTEM_SENSOR"}
 
 
-def test_variant_suffix_map_empty_when_no_suffix_configured(tmp_path: Path) -> None:
-    """No suffix configured -> map value is empty string for that
+def test_variant_subsystem_map_empty_when_none_configured(tmp_path: Path) -> None:
+    """No subsystem configured -> map value is empty string for that
     variant -> discovery treats the entry as "no filter."""
-    yaml = _write_profile_with_suffix(tmp_path, None)
+    yaml = _write_profile_with_key(tmp_path, None)
     cfg = SimConfig.load(yaml)
-    assert cfg.variant_suffix_map == {"MRAD_Sensor": ""}
+    assert cfg.variant_subsystem_map == {"MRAD_Sensor": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +194,7 @@ def test_variant_suffix_map_empty_when_no_suffix_configured(tmp_path: Path) -> N
 def test_releasability_defaults_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOGISTICS_SIM_RELEASABILITY_PATH", raising=False)
     monkeypatch.delenv("LOGISTICS_SIM_SITE_NATION", raising=False)
-    yaml = _write_profile_with_suffix(tmp_path, None)
+    yaml = _write_profile_with_key(tmp_path, None)
     cfg = SimConfig.load(yaml)
     assert cfg.releasability_path == "/ontology/releasability.yaml"
     assert cfg.site_nation == ""

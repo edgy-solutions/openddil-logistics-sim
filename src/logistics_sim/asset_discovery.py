@@ -183,10 +183,27 @@ def _kills_from(data: dict) -> frozenset[str]:
     return frozenset(out)
 
 
-def _asset_state_from_json(data: dict) -> tuple[str, str, AssetState] | None:
+def _declared_subsystem(value) -> str | None:
+    """Normalize a declared AssetIdentity.subsystem to its enum name.
+    Absent, empty, or ASSET_SUBSYSTEM_UNSPECIFIED -> None."""
+    if not value or value in (0, "ASSET_SUBSYSTEM_UNSPECIFIED"):
+        return None
+    return str(value)
+
+
+def subsystem_matches(required: str, declared: str | None) -> bool:
+    """A profile's match_subsystem gate. Empty `required` disables the
+    filter; otherwise the event must declare exactly that subsystem."""
+    return not required or declared == required
+
+
+def _asset_state_from_json(
+    data: dict,
+) -> tuple[str, str, AssetState, str | None] | None:
     """JSON-encoded EntityTelemetryEvent shape. Pulls (asset_id,
     platform_variant, AssetState) -- returns None if asset_id or
-    platform_variant is missing."""
+    platform_variant is missing. The declared asset subsystem rides
+    along as a fourth element (None when absent or unspecified)."""
     asset = data.get("asset") or {}
     asset_id = asset.get("asset_id") or data.get("asset_id")
     variant = asset.get("platform_variant") or data.get("platform_variant")
@@ -201,7 +218,10 @@ def _asset_state_from_json(data: dict) -> tuple[str, str, AssetState] | None:
         actively_receiving=_coerce_bool(op.get("actively_receiving"), True),
         subsystem_kills=_kills_from(data),
     )
-    return str(asset_id), str(variant), state
+    return (
+        str(asset_id), str(variant), state,
+        _declared_subsystem(asset.get("subsystem")),
+    )
 
 
 def _proto_bool_with_default(msg, field_name: str, default: bool) -> bool:
@@ -229,7 +249,9 @@ def _proto_bool_with_default(msg, field_name: str, default: bool) -> bool:
     return bool(getattr(msg, field_name))
 
 
-def _asset_state_from_proto(raw: bytes) -> tuple[str, str, AssetState] | None:
+def _asset_state_from_proto(
+    raw: bytes,
+) -> tuple[str, str, AssetState, str | None] | None:
     """Proto-encoded EntityTelemetryEvent path. Same triple, populated
     via the proto field accessors so enum ints become enum names via
     the lookup tables above."""
@@ -250,13 +272,39 @@ def _asset_state_from_proto(raw: bytes) -> tuple[str, str, AssetState] | None:
         actively_transmitting=_proto_bool_with_default(op, "actively_transmitting", True),
         actively_receiving=_proto_bool_with_default(op, "actively_receiving", True),
     )
-    return ev.asset.asset_id, ev.asset.platform_variant, state
+    # Bindings without the field are refused at startup whenever a profile
+    # filters on it (_require_subsystem_field), so absence here only means
+    # no profile needs it.
+    subsystem = None
+    field = ev.asset.DESCRIPTOR.fields_by_name.get("subsystem")
+    if field is not None:
+        value = field.enum_type.values_by_number.get(ev.asset.subsystem)
+        subsystem = _declared_subsystem(
+            value.name if value is not None else str(ev.asset.subsystem)
+        )
+    return ev.asset.asset_id, ev.asset.platform_variant, state, subsystem
 
 
-def _extract(raw: bytes) -> tuple[str, str, AssetState] | None:
+def _require_subsystem_field() -> None:
+    """A profile filters on AssetIdentity.subsystem. Bindings that predate
+    the field would read every record as undeclared, and the profile would
+    quietly match nothing -- refuse to start instead."""
+    try:
+        from openddil.telemetry.v1 import telemetry_pb2  # type: ignore
+    except ImportError:
+        return  # no proto bindings: only the JSON shape is read
+    if "subsystem" not in telemetry_pb2.AssetIdentity.DESCRIPTOR.fields_by_name:
+        raise RuntimeError(
+            "a profile sets match_subsystem but the telemetry bindings have "
+            "no AssetIdentity.subsystem; the runtime bundle's contracts are "
+            "older than this profile"
+        )
+
+
+def _extract(raw: bytes) -> tuple[str, str, AssetState, str | None] | None:
     """Try JSON first (covers overlay proprietary feeds), then proto
     (covers the DIS + faust-edge produced events). Both produce the
-    same triple."""
+    same tuple: (asset_id, platform_variant, state, declared subsystem)."""
     if not raw:
         return None
     try:
@@ -276,7 +324,7 @@ async def run_edge_discovery(
     matched_variants: Iterable[str],
     roster: AssetRoster,
     variant_canonical_map: Mapping[str, str] | None = None,
-    variant_suffix_map: Mapping[str, str] | None = None,
+    variant_subsystem_map: Mapping[str, str] | None = None,
 ) -> None:
     """One coroutine per edge cluster. Updates the per-asset
     AssetState every time a record arrives -- including the tx/rx
@@ -290,19 +338,22 @@ async def run_edge_discovery(
     already canonical, every variant looks up to itself).
     Loaded from `platform_variant_aliases.yaml` by main.py.
 
-    `variant_suffix_map` carries the per-profile asset_id-suffix
-    filter (AssetProfile.match_asset_id_suffix). When the entry for
-    the resolved canonical variant is non-empty, the asset_id MUST
-    end with that suffix or the message is skipped. Lets a profile
-    target one KIND of asset when multiple kinds share a variant
-    (e.g. MRAD: per-site SENSOR `*_Sensor` keeps the multi-array
-    profile, per-site RADAR CHASSIS `*_radar` falls out -- both
-    carry variant=MRAD_Sensor after aliasing but only the sensor
-    has the array subsystem the profile synthesizes for).
+    `variant_subsystem_map` carries the per-profile declared-subsystem
+    filter (AssetProfile.match_subsystem). When the entry for the
+    resolved canonical variant is non-empty, the event's declared
+    asset.subsystem MUST equal it or the message is skipped. Lets a
+    profile target one KIND of asset when multiple kinds share a
+    variant (e.g. MRAD: the sensor record declares the sensor
+    subsystem and keeps the multi-array profile, the chassis record
+    declares none and falls out -- both carry variant=MRAD_Sensor
+    after aliasing but only the sensor has the array subsystem the
+    profile synthesizes for). asset_id is opaque and never parsed.
     """
     variants = frozenset(matched_variants)
     canonical_map = variant_canonical_map or {}
-    suffix_map = variant_suffix_map or {}
+    subsystem_map = variant_subsystem_map or {}
+    if any(subsystem_map.values()):
+        _require_subsystem_field()
     consumer = AIOKafkaConsumer(
         input_topic,
         bootstrap_servers=brokers,
@@ -313,28 +364,27 @@ async def run_edge_discovery(
     await consumer.start()
     log.info(
         "[%s] discovery consumer started (brokers=%s topic=%s group=%s "
-        "aliases=%d suffix_filters=%d)",
+        "aliases=%d subsystem_filters=%d)",
         edge_id, brokers, input_topic, consumer_group,
         len(canonical_map),
-        sum(1 for s in suffix_map.values() if s),
+        sum(1 for s in subsystem_map.values() if s),
     )
     try:
         async for msg in consumer:
             extracted = _extract(msg.value)
             if not extracted:
                 continue
-            asset_id, native_variant, state = extracted
+            asset_id, native_variant, state, subsystem = extracted
             # Canonicalize via the alias map. Unknown -> passthrough,
             # which matches the dev/docker-compose case where the wire
             # is already canonical (alias file may not be mounted).
             canonical = canonical_map.get(native_variant, native_variant)
             if canonical not in variants:
                 continue
-            # Per-profile asset_id-suffix filter -- applied AFTER the
-            # variant check. Empty suffix string disables the filter
-            # for that variant (legacy single-kind-per-variant case).
-            required_suffix = suffix_map.get(canonical, "")
-            if required_suffix and not asset_id.endswith(required_suffix):
+            # Per-profile declared-subsystem filter -- applied AFTER the
+            # variant check. Empty string disables the filter for that
+            # variant (single-kind-per-variant case).
+            if not subsystem_matches(subsystem_map.get(canonical, ""), subsystem):
                 continue
             # Downstream (tick loop -> profile_for_variant) matches
             # against canonical too, so rewrite the AssetState's

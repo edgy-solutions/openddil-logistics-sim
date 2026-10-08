@@ -48,12 +48,12 @@ asset_profiles:
   #     MRAD_Sensor natively)
   # Only the SENSOR has the array. The chassis is a platform that
   # carries the sensor but has no per-element subsystem of its own.
-  # `match_asset_id_suffix: _Sensor` keeps the chassis (and any other
-  # variant=MRAD_Sensor asset without the suffix) out of discovery,
-  # so the sim doesn't waste cycles synthesizing per-element trees
-  # for things that don't have arrays. The frontend's DiagnosticCanvas
-  # applies the same gate for the multi-array 3D view (only routes
-  # to SensorArrayView when assetId.endsWith('_Sensor')).
+  # The boundary mapper declares which record is the sensor
+  # (AssetIdentity.subsystem). `match_subsystem: ASSET_SUBSYSTEM_SENSOR`
+  # keeps the chassis (and any other variant=MRAD_Sensor asset that
+  # does not declare the sensor subsystem) out of discovery, so the
+  # sim doesn't waste cycles synthesizing per-element trees for things
+  # that don't have arrays. asset_id is opaque and never parsed.
   #
   # MRAD_Interceptor (launchers) intentionally absent from matches --
   # launchers are kinetic effectors, not sensor subsystems, no array
@@ -66,7 +66,7 @@ asset_profiles:
       - MRAD_Sensor
       - MRAD_Radar    # aliases to MRAD_Sensor at ingress; kept for safety
       - MRAD2_radar   # customer-overlay specific variant token
-    match_asset_id_suffix: "_Sensor"
+    match_subsystem: ASSET_SUBSYSTEM_SENSOR
     # IMPORTANT: cols×rows MUST match the frontend's MRAD_CONFIG.layers
     # in openddil-demo/frontend/src/components/SensorArrayView.tsx — the
     # path-encoded element ids (TR-.../BOARD-i-j/MODULE-i-j/CHIP-i-j)

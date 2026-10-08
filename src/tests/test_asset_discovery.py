@@ -154,3 +154,89 @@ async def test_burst_changes_coalesce_into_single_event_set() -> None:
     # property the tick-loop coalesce contract depends on.
     roster.changed_event.clear()
     assert not roster.changed_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Declared-subsystem matching -- asset_id is opaque, so a profile's
+# match_subsystem is compared against the declared asset.subsystem only.
+# ---------------------------------------------------------------------------
+
+
+def _json_event(asset_id: str, subsystem: str | None = None) -> bytes:
+    import json
+
+    asset = {"asset_id": asset_id, "platform_variant": "MRAD_Sensor"}
+    if subsystem is not None:
+        asset["subsystem"] = subsystem
+    return json.dumps({"asset": asset}).encode()
+
+
+def test_declared_sensor_subsystem_matches_profile() -> None:
+    from logistics_sim.asset_discovery import _extract, subsystem_matches
+
+    extracted = _extract(_json_event("site-1-radar", "ASSET_SUBSYSTEM_SENSOR"))
+    assert extracted is not None
+    assert extracted[3] == "ASSET_SUBSYSTEM_SENSOR"
+    assert subsystem_matches("ASSET_SUBSYSTEM_SENSOR", extracted[3])
+
+
+def test_suffix_without_declared_subsystem_does_not_match() -> None:
+    """An asset_id ending `_Sensor` with no declared subsystem is not
+    a sensor: the id is never parsed."""
+    from logistics_sim.asset_discovery import _extract, subsystem_matches
+
+    extracted = _extract(_json_event("site-1-radar_MRAD_Sensor"))
+    assert extracted is not None
+    assert extracted[3] is None
+    assert not subsystem_matches("ASSET_SUBSYSTEM_SENSOR", extracted[3])
+
+
+def test_unspecified_subsystem_reads_as_absent() -> None:
+    from logistics_sim.asset_discovery import _extract
+
+    extracted = _extract(_json_event("a", "ASSET_SUBSYSTEM_UNSPECIFIED"))
+    assert extracted is not None and extracted[3] is None
+
+
+def test_empty_required_subsystem_matches_anything() -> None:
+    from logistics_sim.asset_discovery import subsystem_matches
+
+    assert subsystem_matches("", None)
+    assert subsystem_matches("", "ASSET_SUBSYSTEM_SENSOR")
+
+
+def test_proto_path_reads_declared_subsystem() -> None:
+    """The proto decode reads the enum through the bindings, not a guess."""
+    telemetry_pb2 = pytest.importorskip("openddil.telemetry.v1.telemetry_pb2")
+    if "subsystem" not in telemetry_pb2.AssetIdentity.DESCRIPTOR.fields_by_name:
+        pytest.skip("bindings predate AssetIdentity.subsystem")
+    from logistics_sim.asset_discovery import _extract
+
+    ev = telemetry_pb2.EntityTelemetryEvent()
+    ev.asset.asset_id = "site-1-radar"
+    ev.asset.platform_variant = "V"
+    ev.asset.subsystem = telemetry_pb2.ASSET_SUBSYSTEM_SENSOR
+    extracted = _extract(ev.SerializeToString())
+    assert extracted is not None
+    assert extracted[3] == "ASSET_SUBSYSTEM_SENSOR"
+
+
+def test_bindings_without_subsystem_refuse_a_subsystem_profile(monkeypatch) -> None:
+    """Stale bindings would read every record as undeclared and the
+    profile would match nothing; startup refuses instead."""
+    import sys
+    import types
+
+    from logistics_sim import asset_discovery
+
+    stale = types.SimpleNamespace(
+        AssetIdentity=types.SimpleNamespace(
+            DESCRIPTOR=types.SimpleNamespace(fields_by_name={"asset_id": object()})
+        )
+    )
+    pkg = types.ModuleType("openddil.telemetry.v1")
+    pkg.telemetry_pb2 = stale
+    monkeypatch.setitem(sys.modules, "openddil.telemetry.v1", pkg)
+    monkeypatch.setitem(sys.modules, "openddil.telemetry.v1.telemetry_pb2", stale)
+    with pytest.raises(RuntimeError, match="match_subsystem"):
+        asset_discovery._require_subsystem_field()

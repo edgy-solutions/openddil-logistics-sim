@@ -95,24 +95,22 @@ class AssetProfile:
     faces: tuple[FaceSpec, ...]
     synthesis: SynthesisKnobs
 
-    # Optional asset_id-suffix filter applied AFTER platform_variant
+    # Optional declared-subsystem filter applied AFTER platform_variant
     # matching. Lets a profile match a variant that's used by multiple
     # asset KINDS in the customer wire model but apply only to the
-    # right one. Specific case (2026-06-29): after the per-site sensor
-    # identity fix in the customer-bundle Bloblang, both per-site
-    # SENSORS (asset_id ends in `_Sensor`) and per-site RADAR CHASSIS
-    # (asset_id ends in `_radar`) carry platform_variant=MRAD_Sensor
-    # (the chassis via alias). Only the sensor has the multi-array
-    # subsystem the MRAD profile synthesizes for. With
-    # match_asset_id_suffix=`_Sensor`, the chassis falls out of
+    # right one. Both per-site SENSORS and per-site RADAR CHASSIS carry
+    # platform_variant=MRAD_Sensor (the chassis via alias), but only
+    # the sensor has the multi-array subsystem the MRAD profile
+    # synthesizes for. The boundary mapper declares which record is the
+    # sensor (AssetIdentity.subsystem); with
+    # match_subsystem=`ASSET_SUBSYSTEM_SENSOR` the chassis falls out of
     # discovery -- no wasted Kafka traffic, no wasted postgres rows,
-    # no element telemetry for assets without arrays.
+    # no element telemetry for assets without arrays. asset_id is
+    # opaque and never parsed.
     #
     # Empty string (or absent in YAML) disables the filter -- the
-    # profile then matches purely on platform_variant, preserving the
-    # pre-2026-06-29 behavior for profiles that don't have the
-    # variant-shared-across-kinds problem.
-    match_asset_id_suffix: str = ""
+    # profile then matches purely on platform_variant.
+    match_subsystem: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -457,13 +455,13 @@ class SimConfig:
         return frozenset(out)
 
     @property
-    def variant_suffix_map(self) -> dict[str, str]:
-        """Per-variant asset_id suffix filter (from AssetProfile.
-        match_asset_id_suffix). Empty string means "no filter -- match
-        any asset_id with that variant."
+    def variant_subsystem_map(self) -> dict[str, str]:
+        """Per-variant declared-subsystem filter (from AssetProfile.
+        match_subsystem). Empty string means "no filter -- match
+        any asset with that variant."
 
         The set of keys is identical to all_matched_variants; discovery
-        uses this to apply the suffix filter on each message after the
+        uses this to apply the subsystem filter on each message after the
         cheap variant pre-check passes. Multiple profiles can share a
         variant in principle; in that case the last profile in the
         config wins (degenerate but harmless -- maintain that the
@@ -471,11 +469,17 @@ class SimConfig:
         out: dict[str, str] = {}
         for p in self.profiles:
             for v in p.matches_platform_variants:
-                out[v] = p.match_asset_id_suffix
+                out[v] = p.match_subsystem
         return out
 
 
 def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
+    if "match_asset_id_suffix" in raw:
+        raise ValueError(
+            f"profile {raw.get('name')!r}: `match_asset_id_suffix` is no "
+            "longer supported (asset_id is opaque); use "
+            "`match_subsystem: ASSET_SUBSYSTEM_SENSOR` instead"
+        )
     layers = tuple(
         LayerSpec(
             name=str(l["name"]),
@@ -550,7 +554,7 @@ def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
         layers=layers,
         faces=faces,
         synthesis=synthesis,
-        match_asset_id_suffix=str(raw.get("match_asset_id_suffix", "")),
+        match_subsystem=str(raw.get("match_subsystem", "")),
     )
 
 

@@ -237,11 +237,12 @@ async def _serve(cfg: SimConfig) -> int:
     # the dev-environment fallback -- match canonical-only.
     canonical_map = load_variant_aliases()
 
-    # Per-profile asset_id-suffix filter (e.g. MRAD profile requires
-    # asset_id to end in `_Sensor` so per-site radar chassis with the
-    # same MRAD_Sensor variant fall out). Always passed; empty suffix
-    # per variant disables the filter for that variant.
-    suffix_map = cfg.variant_suffix_map
+    # Per-profile declared-subsystem filter (e.g. MRAD profile requires
+    # the record to declare the sensor subsystem so per-site radar
+    # chassis with the same MRAD_Sensor variant fall out). Always
+    # passed; empty value per variant disables the filter for that
+    # variant.
+    subsystem_map = cfg.variant_subsystem_map
 
     tasks: list[asyncio.Task[None]] = []
     for edge_id, brokers in cfg.edge_clusters.items():
@@ -255,7 +256,7 @@ async def _serve(cfg: SimConfig) -> int:
                 matched_variants=matched,
                 roster=roster,
                 variant_canonical_map=canonical_map,
-                variant_suffix_map=suffix_map,
+                variant_subsystem_map=subsystem_map,
             ),
             name=f"discovery-{edge_id}",
         ))
