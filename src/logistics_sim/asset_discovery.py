@@ -237,15 +237,19 @@ def _proto_bool_with_default(msg, field_name: str, default: bool) -> bool:
     Behavior:
       * If `HasField` works AND field is unset -> return `default`.
       * If `HasField` works AND field is set   -> return the value.
-      * If `HasField` raises (proto3 scalar)   -> use the wire value;
-        proto3 cannot distinguish 'unset' from 'explicit false', so
-        defaulting on absence is impossible here.
+      * If `HasField` raises (proto3 scalar)   -> a wire True is a
+        positive claim and is returned; a wire False cannot be told
+        from unset, so it returns `default`. An absent claim must not
+        become a fault (ADR-0026 amendment: absence is not health).
+        The explicit-false claim given up here returns once the
+        fields carry presence.
     """
     try:
         if not msg.HasField(field_name):
             return default
     except ValueError:
-        pass  # proto3 scalar without optional -- value-only path
+        # proto3 scalar without optional -- value-only path
+        return True if getattr(msg, field_name) else default
     return bool(getattr(msg, field_name))
 
 

@@ -240,3 +240,60 @@ def test_bindings_without_subsystem_refuse_a_subsystem_profile(monkeypatch) -> N
     monkeypatch.setitem(sys.modules, "openddil.telemetry.v1.telemetry_pb2", stale)
     with pytest.raises(RuntimeError, match="match_subsystem"):
         asset_discovery._require_subsystem_field()
+
+
+def _nominal_proto_event(**op_fields) -> bytes:
+    telemetry_pb2 = pytest.importorskip("openddil.telemetry.v1.telemetry_pb2")
+    ev = telemetry_pb2.EntityTelemetryEvent()
+    ev.asset.asset_id = "site-1-radar"
+    ev.asset.platform_variant = "V"
+    ev.operational_state.health_state = telemetry_pb2.HEALTH_STATE_NOMINAL
+    ev.operational_state.power_state = telemetry_pb2.POWER_STATE_ON
+    for name, value in op_fields.items():
+        setattr(ev.operational_state, name, value)
+    return ev.SerializeToString()
+
+
+def test_proto_unset_tx_rx_is_not_a_fault() -> None:
+    """A source that never claimed tx/rx decodes as False on the wire;
+    that is absence, not a fault."""
+    from logistics_sim.asset_discovery import _extract
+    from logistics_sim.element_gen import SeverityTier
+
+    extracted = _extract(_nominal_proto_event())
+    assert extracted is not None
+    state = extracted[2]
+    assert state.actively_transmitting is True
+    assert state.actively_receiving is True
+    assert state.severity_tier((), ()) == SeverityTier.NOMINAL
+
+
+def test_proto_explicit_true_tx_survives() -> None:
+    from logistics_sim.asset_discovery import _extract
+
+    extracted = _extract(_nominal_proto_event(actively_transmitting=True))
+    assert extracted is not None
+    assert extracted[2].actively_transmitting is True
+
+
+def test_proto_bool_presence_path_unchanged() -> None:
+    from logistics_sim.asset_discovery import _proto_bool_with_default
+
+    class _Msg:
+        def __init__(self, **set_fields) -> None:
+            self._f = set_fields
+
+        def HasField(self, name: str) -> bool:
+            return name in self._f
+
+        def __getattr__(self, name: str):
+            return self._f.get(name, False)
+
+    assert _proto_bool_with_default(_Msg(), "x", True) is True
+    assert _proto_bool_with_default(_Msg(x=False), "x", True) is False
+
+
+def test_malformed_json_falls_through_to_proto() -> None:
+    from logistics_sim.asset_discovery import _extract
+
+    assert _extract(b"{not json") is None
