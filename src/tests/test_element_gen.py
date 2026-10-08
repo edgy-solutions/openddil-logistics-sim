@@ -951,3 +951,20 @@ def test_tactical_claim_beats_sim_silence():
                    subsystem_kills=frozenset({"WEAPONS"}))
     assert s.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
     assert s.constrained_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.FAULT
+
+
+def test_unknown_tier_gets_no_lift(mrad_layers, mrad_faces, synthesis):
+    """An asset whose source claimed neither health nor power resolves to
+    UNKNOWN. Absence is not health: its synthesized elements stay in the
+    nominal band instead of taking the FAILED yellow/red fractions."""
+    unclaimed = AssetState(platform_variant="MRAD_Sensor")
+    assert unclaimed.severity_tier(DEGRADED_POWER, DEGRADED_HEALTH) is SeverityTier.UNKNOWN
+    snap = generate_snapshot(
+        asset_id="demo:unclaimed-sensor",
+        asset_state=unclaimed,
+        layers=mrad_layers, faces=mrad_faces, synthesis=synthesis,
+        tick_bucket=0,
+        degraded_power_states=DEGRADED_POWER,
+        degraded_health_states=DEGRADED_HEALTH,
+    )
+    assert max(e.health for e in snap) <= synthesis.health_nominal_max

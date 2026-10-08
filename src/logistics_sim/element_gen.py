@@ -422,7 +422,9 @@ def generate_snapshot(
     # The tuple semantic is (yellow_fraction, red_fraction) where
     # yellow == >0.90 health, red == >0.97 -- thresholds match the
     # frontend's getStatusFromHealth.
-    if tier is SeverityTier.NOMINAL or tier is SeverityTier.POWER_OFF:
+    # UNKNOWN (no claim on either axis) gets no lift either: absence is
+    # not health, so it must not fall through to the FAILED fractions.
+    if tier in (SeverityTier.NOMINAL, SeverityTier.POWER_OFF, SeverityTier.UNKNOWN):
         tier_yellow, tier_red = 0.0, 0.0
     elif tier is SeverityTier.DEGRADED:
         tier_yellow = synthesis.degraded_yellow_fraction
