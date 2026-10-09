@@ -59,9 +59,15 @@ class SynthesisKnobs:
     #   FAILED   asset → heavier mix of yellow + red
     #
     # Mapping for non-health-state inputs:
-    #   POWER_STATE_OFF / SHUTTING_DOWN  → FAILED
+    #   POWER_STATE_OFF / SHUTTING_DOWN  → POWER_OFF (its own tier: nominal
+    #                                      health, tx/rx off, no lift)
     #   POWER_STATE_MAINTENANCE          → DEGRADED
     #   tx_off AND rx_off (mismatch)     → FAULT
+    #
+    # Condition-driven tiers (see AssetState.synthesis_tier): CRITICAL uses
+    # the critical_* pair, SENSOR_FAILED reuses the failed_* pair,
+    # NOT_EMITTING / DEACTIVATED lift nothing, and DESTROYED lifts every
+    # element into red (destroyed_red_fraction, default 1.0).
     degraded_yellow_fraction: float
     degraded_red_fraction: float
     fault_yellow_fraction: float
@@ -82,6 +88,12 @@ class SynthesisKnobs:
     load_max: float
     tick_drift_temp: float
     tick_drift_load: float
+
+    # Condition-driven tiers. Defaulted so existing constructors and the
+    # legacy collapsed config keep working.
+    critical_yellow_fraction: float = 0.30
+    critical_red_fraction: float = 0.20
+    destroyed_red_fraction: float = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -555,6 +567,9 @@ def _parse_profile(raw: dict[str, Any]) -> AssetProfile:
         load_max=float(s.get("load_max", 95)),
         tick_drift_temp=float(s.get("tick_drift_temp", 1.5)),
         tick_drift_load=float(s.get("tick_drift_load", 5.0)),
+        critical_yellow_fraction=float(s.get("critical_yellow_fraction", 0.30)),
+        critical_red_fraction=float(s.get("critical_red_fraction", 0.20)),
+        destroyed_red_fraction=float(s.get("destroyed_red_fraction", 1.0)),
     )
     return AssetProfile(
         name=str(raw["name"]),

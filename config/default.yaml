@@ -140,6 +140,14 @@ asset_profiles:
       failed_yellow_fraction:   0.30
       failed_red_fraction:      0.20
 
+      # Condition-driven tiers (a resolved condition from the telemetry
+      # feed overrides the tiers above). SENSOR_FAILED reuses the failed_*
+      # pair; NOT_EMITTING / DEACTIVATED lift nothing; DESTROYED lifts every
+      # element into red.
+      critical_yellow_fraction: 0.30
+      critical_red_fraction:    0.20
+      destroyed_red_fraction:   1.0
+
       # Legacy single-fraction knob -- kept so older configs still
       # load. New deployments should use the per-tier fields above;
       # this fallback is only honored when NONE of the tier_*_fraction

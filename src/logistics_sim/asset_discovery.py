@@ -101,7 +101,12 @@ class AssetRoster:
         for f in self._TIER_RELEVANT_FIELDS:
             if getattr(old, f, None) != getattr(new, f, None):
                 return True
-        return False
+        # Compare the condition's level and moved_by only. Its claims carry
+        # observed_at, which changes on every record; waking the loop on
+        # that would republish every few seconds for nothing.
+        oc, nc = old.condition or {}, new.condition or {}
+        return (oc.get("level") != nc.get("level")
+                or oc.get("moved_by") != nc.get("moved_by"))
 
     def upsert(
         self, asset_id: str, state: AssetState, edge_id: str | None = None,
@@ -208,6 +213,26 @@ def subsystem_matches(required: str, declared: str | None) -> bool:
     return not required or declared == required
 
 
+def _condition_from_json(value: object) -> dict | None:
+    """The Condition as proto JSON, kept only when it is a dict with a
+    string level; anything else reads as no claim."""
+    if isinstance(value, dict) and isinstance(value.get("level"), str):
+        return value
+    return None
+
+
+def _condition_from_proto(op) -> dict | None:
+    """The Condition as proto JSON (field names, enum names, RFC3339
+    observed_at). Bindings without the field read as no claim."""
+    try:
+        if not op.HasField("condition"):
+            return None
+    except ValueError:
+        return None
+    from google.protobuf import json_format
+    return json_format.MessageToDict(op.condition, preserving_proto_field_name=True)
+
+
 def _asset_state_from_json(
     data: dict,
 ) -> tuple[str, str, AssetState, str | None] | None:
@@ -228,6 +253,7 @@ def _asset_state_from_json(
         actively_transmitting=_coerce_bool(op.get("actively_transmitting"), True),
         actively_receiving=_coerce_bool(op.get("actively_receiving"), True),
         subsystem_kills=_kills_from(data),
+        condition=_condition_from_json(op.get("condition")),
     )
     return (
         str(asset_id), str(variant), state,
@@ -286,6 +312,7 @@ def _asset_state_from_proto(
         health_state=_HEALTH_STATE_NAME.get(op.health_state, "HEALTH_STATE_UNSPECIFIED"),
         actively_transmitting=_proto_bool_with_default(op, "actively_transmitting", True),
         actively_receiving=_proto_bool_with_default(op, "actively_receiving", True),
+        condition=_condition_from_proto(op),
     )
     # Bindings without the field are refused at startup whenever a profile
     # filters on it (_require_subsystem_field), so absence here only means

@@ -15,13 +15,20 @@ Payload envelope (one Kafka record per asset per tick, JSON):
       "health_state": "HEALTH_STATE_NOMINAL",
       "actively_transmitting": true,
       "actively_receiving": true,
-      "degraded": false
+      "degraded": false,
+      "condition": {                         # present only when a source claimed
+        "level": "CONDITION_LEVEL_DEGRADED", # the worst claim
+        "moved_by": ["CONDITION_SOURCE_EMISSION"],
+        "claims": [{"source": ..., "level": ..., "detail": ...,
+                    "observed_at": "<RFC3339>"}, ...]
+      }
     },
     "elements": [
       {"element_id": ..., "layer_depth": ..., "layer_name": ...,
        "health": ..., "temp_c": ..., "load_pct": ...,
-       "tx_active": ..., "rx_active": ...},
-      ...
+       "tx_active": ..., "rx_active": ...,
+       "moved_by": "emission"},   # optional: only on elements the condition
+      ...                         # lifted or silenced; key absent otherwise
     ]
   }
 
@@ -105,6 +112,15 @@ _INVENTORY_DEGRADED_HEALTH_THRESHOLD = 0.90
 # MessageSizeTooLargeError aborts the send.
 _MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 _SNAPSHOT_WARN_BYTES = 12 * 1024 * 1024  # 75% of the ceiling
+
+
+def _element_dict(e: ElementTelemetry) -> dict:
+    """One element as an envelope entry. moved_by is dropped when None so
+    the tens of thousands of untouched elements carry no null key."""
+    d = dataclasses.asdict(e)
+    if d.get("moved_by") is None:
+        del d["moved_by"]
+    return d
 
 
 class HqProducer:
@@ -234,6 +250,8 @@ class HqProducer:
             operational["core_temp_c"] = core_temp_c
         if uptime_hours is not None:
             operational["uptime_hours"] = uptime_hours
+        if asset_state.condition is not None:
+            operational["condition"] = asset_state.condition
         envelope = {
             "asset_id": asset_id,
             **self._label_fields(asset_id),
@@ -241,7 +259,7 @@ class HqProducer:
             "profile_name": profile_name,
             "observed_at_ns": time.time_ns(),
             "operational": operational,
-            "elements": [dataclasses.asdict(e) for e in elements],
+            "elements": [_element_dict(e) for e in elements],
         }
         payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
         size = len(payload)

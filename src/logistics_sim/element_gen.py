@@ -87,6 +87,13 @@ class SeverityTier(enum.Enum):
     # absence and health must not share an exit). Kept out of the "bad"
     # tiers deliberately -- see is_degraded().
     UNKNOWN = "UNKNOWN"
+    # Chosen only from a resolved condition (see AssetState.condition_tier);
+    # the legacy health/power resolver never produces these.
+    CRITICAL = "CRITICAL"
+    NOT_EMITTING = "NOT_EMITTING"
+    SENSOR_FAILED = "SENSOR_FAILED"
+    DEACTIVATED = "DEACTIVATED"
+    DESTROYED = "DESTROYED"
 
 
 # Ordering for "which of these is worse". UNKNOWN sits at the BOTTOM, not
@@ -97,8 +104,13 @@ _TIER_BADNESS = {
     "NOMINAL": 1,
     "DEGRADED": 2,
     "FAULT": 3,
-    "FAILED": 4,
-    "POWER_OFF": 5,
+    "CRITICAL": 4,
+    "FAILED": 5,
+    "POWER_OFF": 6,
+    "NOT_EMITTING": 7,
+    "SENSOR_FAILED": 8,
+    "DEACTIVATED": 9,
+    "DESTROYED": 10,
 }
 
 
@@ -120,6 +132,59 @@ class AssetState:
     # means NO CLAIM — the tactical plane said nothing about this asset's
     # subsystems, which is not the same as saying they are fine.
     subsystem_kills: frozenset[str] = frozenset()
+
+    # The resolved Condition in proto JSON shape (proto field names):
+    # {"level": "CONDITION_LEVEL_X", "moved_by": ["CONDITION_SOURCE_Y", ...],
+    #  "claims": [{"source", "level", "detail", "observed_at"}, ...]}.
+    # None means no source claimed anything. A dict is unhashable, so this
+    # state is never used as a dict key or set member (the roster keys by
+    # asset_id and stores it as a value).
+    condition: dict | None = None
+
+    _CONDITION_TIERS = {
+        "CONDITION_LEVEL_DEGRADED": SeverityTier.DEGRADED,
+        "CONDITION_LEVEL_CRITICAL": SeverityTier.CRITICAL,
+        "CONDITION_LEVEL_NOT_EMITTING": SeverityTier.NOT_EMITTING,
+        "CONDITION_LEVEL_SENSOR_FAILED": SeverityTier.SENSOR_FAILED,
+        "CONDITION_LEVEL_DEACTIVATED": SeverityTier.DEACTIVATED,
+        "CONDITION_LEVEL_DESTROYED": SeverityTier.DESTROYED,
+    }
+
+    def condition_tier(self) -> SeverityTier | None:
+        """The tier the resolved condition names, or None when it names
+        none: NOMINAL, UNSPECIFIED, an unknown level string, or no
+        condition at all."""
+        if not self.condition:
+            return None
+        return self._CONDITION_TIERS.get(self.condition.get("level"))
+
+    def synthesis_tier(self,
+                       degraded_power_states: tuple[str, ...],
+                       degraded_health_states: tuple[str, ...]) -> SeverityTier:
+        """The tier generate_snapshot synthesizes from. A non-nominal
+        condition overrides the legacy resolution: the DIS appearance that
+        feeds health/power also feeds the condition, so they agree, and
+        emission and datum claims exist only in the condition. A nominal or
+        absent condition falls back to severity_tier() and so to the
+        profile's own drift. severity_tier itself is unchanged."""
+        cond = self.condition_tier()
+        if cond is not None:
+            return cond
+        return self.severity_tier(degraded_power_states, degraded_health_states)
+
+    def moved_by_code(self) -> str | None:
+        """The condition's moved_by sources as short lowercase names
+        (appearance_damage, appearance_power, emission, data_health),
+        joined with "+" in the order given. None when condition_tier()
+        is None."""
+        if self.condition_tier() is None:
+            return None
+        prefix = "CONDITION_SOURCE_"
+        names = [
+            str(m)[len(prefix):].lower() if str(m).startswith(prefix) else str(m).lower()
+            for m in (self.condition.get("moved_by") or [])
+        ]
+        return "+".join(names)
 
     def tactical_cap(self) -> SeverityTier | None:
         """The worst tier the TACTICAL plane permits this asset to claim.
@@ -311,6 +376,9 @@ class ElementTelemetry:
     load_pct: float
     tx_active: bool = True
     rx_active: bool = True
+    # Which condition sources lifted or silenced this element; set only
+    # when the condition drove synthesis, never under the legacy fallback.
+    moved_by: str | None = None
 
 
 def _seeded_rng(asset_id: str, element_id: str, tick_bucket: int) -> random.Random:
@@ -396,7 +464,9 @@ def generate_snapshot(
     until the asset-level state flips back.
     """
     out: list[ElementTelemetry] = []
-    tier = asset_state.severity_tier(degraded_power_states, degraded_health_states)
+    tier = asset_state.synthesis_tier(degraded_power_states, degraded_health_states)
+    cond_active = asset_state.condition_tier() is not None
+    moved_by = asset_state.moved_by_code() if cond_active else None
     asset_tx = asset_state.actively_transmitting
     asset_rx = asset_state.actively_receiving
 
@@ -411,10 +481,18 @@ def generate_snapshot(
     # colors alone can't distinguish "everything nominal, nothing
     # firing" from "asset OFF, nothing firing"; the asset-level
     # signal is needed to disambiguate.
-    is_power_off = tier is SeverityTier.POWER_OFF
+    # NOT_EMITTING / DEACTIVATED / DESTROYED silence the whole tree the same
+    # way; SENSOR_FAILED silences only the face's transmit side.
+    is_power_off = tier in (
+        SeverityTier.POWER_OFF, SeverityTier.NOT_EMITTING,
+        SeverityTier.DEACTIVATED, SeverityTier.DESTROYED,
+    )
+    is_sensor_failed = tier is SeverityTier.SENSOR_FAILED
     if is_power_off:
         asset_tx = False
         asset_rx = False
+    elif is_sensor_failed:
+        asset_tx = False
 
     # Per-tier (yellow, red) fractions. NOMINAL gets no lift; everything
     # else pulls from the SynthesisKnobs matrix populated from the
@@ -424,17 +502,27 @@ def generate_snapshot(
     # frontend's getStatusFromHealth.
     # UNKNOWN (no claim on either axis) gets no lift either: absence is
     # not health, so it must not fall through to the FAILED fractions.
-    if tier in (SeverityTier.NOMINAL, SeverityTier.POWER_OFF, SeverityTier.UNKNOWN):
+    if tier in (SeverityTier.NOMINAL, SeverityTier.POWER_OFF, SeverityTier.UNKNOWN,
+                SeverityTier.NOT_EMITTING, SeverityTier.DEACTIVATED):
         tier_yellow, tier_red = 0.0, 0.0
+    elif tier is SeverityTier.DESTROYED:
+        tier_yellow, tier_red = 0.0, synthesis.destroyed_red_fraction
+    elif tier is SeverityTier.CRITICAL:
+        tier_yellow = synthesis.critical_yellow_fraction
+        tier_red    = synthesis.critical_red_fraction
     elif tier is SeverityTier.DEGRADED:
         tier_yellow = synthesis.degraded_yellow_fraction
         tier_red    = synthesis.degraded_red_fraction
     elif tier is SeverityTier.FAULT:
         tier_yellow = synthesis.fault_yellow_fraction
         tier_red    = synthesis.fault_red_fraction
-    else:  # SeverityTier.FAILED
+    else:  # FAILED, SENSOR_FAILED
         tier_yellow = synthesis.failed_yellow_fraction
         tier_red    = synthesis.failed_red_fraction
+
+    # Elements whose roll landed in a lifted band, so _build_node can stamp
+    # moved_by on exactly them. Only filled when a condition drives the tier.
+    lifted: set[str] = set()
 
     def _synth_health(elem_id: str, parent_health: float | None) -> float:
         # Tick-invariant seed: same element always gets the same health
@@ -453,8 +541,13 @@ def generate_snapshot(
         # Layered: red band wins if roll lands in [0, tier_red);
         # yellow band next if roll lands in [tier_red, tier_red +
         # tier_yellow). Everything else (the majority) stays nominal.
+        if cond_active and roll < tier_red + tier_yellow:
+            lifted.add(elem_id)
         if roll < tier_red:
-            health = rng.uniform(_TIER_CRITICAL, 1.00)
+            # Start just above the threshold: health is rounded to 4 places
+            # on output, and a draw within 5e-5 of 0.97 would round to
+            # exactly 0.97, which the ">0.97" red test does not accept.
+            health = rng.uniform(_TIER_CRITICAL + 0.0001, 1.00)
         elif roll < tier_red + tier_yellow:
             health = rng.uniform(_TIER_DEGRADED, _TIER_CRITICAL)
         return _cap_to_parent_tier(health, parent_health)
@@ -483,6 +576,8 @@ def generate_snapshot(
         # active while the face was idle.
         tx_active = asset_tx if (depth == 0 or is_power_off) else True
         rx_active = asset_rx if (depth == 0 or is_power_off) else True
+        # tx/rx forced off by the condition tier (not by the feed's own flags).
+        forced_off = cond_active and (is_power_off or (is_sensor_failed and depth == 0))
         out.append(ElementTelemetry(
             element_id=elem_id,
             layer_depth=depth,
@@ -492,6 +587,7 @@ def generate_snapshot(
             load_pct=round(load_pct, 1),
             tx_active=tx_active,
             rx_active=rx_active,
+            moved_by=moved_by if (cond_active and (elem_id in lifted or forced_off)) else None,
         ))
 
     def _recurse(parent_id: str | None, parent_health: float | None, depth: int) -> None:
