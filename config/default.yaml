@@ -21,6 +21,14 @@ tick_interval_s: 30
 # (the projector) handles them all uniformly.
 output_topic: asset-element-telemetry
 
+# Where per-element snapshots are published: `hq` (the HQ broker; the
+# code default) or `edge` (the broker of the edge that owns the asset,
+# as a real sensor reports at its own edge). Opt in to `edge` together
+# with a chart that keeps this topic off the uplink; the edge derives a
+# rollup and only that crosses. Inventory and parts-availability stay
+# on HQ in both modes. Any other value fails config load.
+element_publish_tier: hq
+
 # Which PowerState / HealthState enum values count as "asset is
 # degraded" for synthesis. Defaults err toward "show as degraded if
 # in doubt" -- the maintainer demo wants the broken-element visual

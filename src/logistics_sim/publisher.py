@@ -75,6 +75,7 @@ import dataclasses
 import json
 import logging
 import time
+from typing import Callable
 
 from aiokafka import AIOKafkaProducer
 
@@ -122,6 +123,8 @@ class HqProducer:
         inventory_topic: str = "asset-element-inventory",
         *,
         declaration: ReleasabilityDeclaration | None = None,
+        edge_brokers: dict[str, str] | None = None,
+        edge_of: Callable[[str], str | None] | None = None,
     ) -> None:
         self._brokers = brokers
         self._topic = topic
@@ -131,6 +134,19 @@ class HqProducer:
         # is emitted exactly as before, with no label fields. Keeps
         # every pre-existing caller/test valid without change.
         self._declaration = declaration
+        # Per-edge routing for the element snapshot. None means "hq
+        # mode": every snapshot goes to the HQ producer, as before.
+        # A dict (edge_id -> brokers) means "edge mode": a snapshot is
+        # sent to the producer of the edge that owns the asset, and
+        # never to HQ. `edge_of` resolves the owning edge id.
+        self._edge_brokers = edge_brokers
+        self._edge_of = edge_of
+        self._edge_producers: dict[str, AIOKafkaProducer] = {}
+        self._warned_unrouted: set[str] = set()
+
+    @property
+    def edge_mode(self) -> bool:
+        return self._edge_brokers is not None
 
     def _label_fields(self, asset_id: str) -> dict:
         """originator_nation / releasable_to for this asset, or {}.
@@ -149,9 +165,9 @@ class HqProducer:
             "releasable_to": list(label.releasable_to),
         }
 
-    async def start(self) -> None:
-        self._producer = AIOKafkaProducer(
-            bootstrap_servers=self._brokers,
+    def _new_kafka_producer(self, brokers: str) -> AIOKafkaProducer:
+        return AIOKafkaProducer(
+            bootstrap_servers=brokers,
             acks=1,
             enable_idempotence=False,
             # Per-asset element-tree envelope can run ~5MB (96 face × 6
@@ -161,13 +177,31 @@ class HqProducer:
             # compose redpanda-init / helm topic-init).
             max_request_size=_MAX_MESSAGE_BYTES,
         )
+
+    async def start(self) -> None:
+        self._producer = self._new_kafka_producer(self._brokers)
         await self._producer.start()
         log.info(
             "HQ producer started (brokers=%s element_topic=%s inventory_topic=%s)",
             self._brokers, self._topic, self._inventory_topic,
         )
+        for edge_id, brokers in (self._edge_brokers or {}).items():
+            producer = self._new_kafka_producer(brokers)
+            await producer.start()
+            self._edge_producers[edge_id] = producer
+        if self.edge_mode:
+            log.info(
+                "element snapshots publish on the owning edge's broker "
+                "(element_publish_tier=edge, edges with producers=%s)",
+                sorted(self._edge_producers),
+            )
+        else:
+            log.info("element snapshots publish to HQ (element_publish_tier=hq)")
 
     async def stop(self) -> None:
+        for producer in self._edge_producers.values():
+            await producer.stop()
+        self._edge_producers.clear()
         if self._producer is not None:
             await self._producer.stop()
             self._producer = None
@@ -231,9 +265,32 @@ class HqProducer:
         else:
             log.debug("asset %s snapshot payload=%d bytes (%d elements)",
                       asset_id, size, len(elements))
-        await self._producer.send_and_wait(
+        target = self._snapshot_target(asset_id)
+        if target is None:
+            return
+        await target.send_and_wait(
             self._topic, value=payload, key=asset_id.encode("utf-8"),
         )
+
+    def _snapshot_target(self, asset_id: str) -> AIOKafkaProducer | None:
+        """Producer that carries this asset's element snapshot. HQ in hq
+        mode. In edge mode, the owning edge's producer; when the owner
+        is unknown or has no producer, None (warned once per asset) --
+        never HQ, which would put the raw element tree on the HQ store."""
+        if not self.edge_mode:
+            return self._producer
+        edge_id = self._edge_of(asset_id) if self._edge_of is not None else None
+        producer = self._edge_producers.get(edge_id) if edge_id else None
+        if producer is None:
+            if asset_id not in self._warned_unrouted:
+                self._warned_unrouted.add(asset_id)
+                log.warning(
+                    "asset %s has no owning-edge producer (owner=%s, "
+                    "edges with producers=%s); element snapshot skipped",
+                    asset_id, edge_id, sorted(self._edge_producers),
+                )
+            return None
+        return producer
 
     async def publish_inventory(
         self,

@@ -347,6 +347,9 @@ class SimConfig:
     # cluster.
     edge_clusters: dict[str, str]
     hq_brokers: str
+    # Where element snapshots publish: "hq" (the HQ broker) or "edge"
+    # (the owning edge's broker).
+    element_publish_tier: str
     input_topic: str
     consumer_group_prefix: str
 
@@ -391,6 +394,12 @@ class SimConfig:
         hq_brokers = os.environ.get(
             "LOGISTICS_SIM_HQ_BROKERS", "openddil-redpanda-hq:19092",
         )
+        element_publish_tier = str(raw.get("element_publish_tier", "hq"))
+        if element_publish_tier not in ("hq", "edge"):
+            raise ValueError(
+                f"{path}: element_publish_tier must be 'hq' or 'edge', "
+                f"got {element_publish_tier!r}"
+            )
         input_topic = os.environ.get(
             "LOGISTICS_SIM_INPUT_TOPIC", "telemetry-latest-state",
         )
@@ -429,6 +438,7 @@ class SimConfig:
             ),
             edge_clusters=edge_clusters,
             hq_brokers=hq_brokers,
+            element_publish_tier=element_publish_tier,
             input_topic=input_topic,
             consumer_group_prefix=consumer_group_prefix,
             releasability_path=releasability_path,

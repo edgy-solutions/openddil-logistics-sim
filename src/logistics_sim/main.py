@@ -225,7 +225,12 @@ async def _serve(cfg: SimConfig) -> int:
         cfg.releasability_path, declaration.asset_count,
         cfg.site_nation if cfg.site_nation else "(none)",
     )
-    producer = HqProducer(cfg.hq_brokers, cfg.output_topic, declaration=declaration)
+    edge_mode = cfg.element_publish_tier == "edge"
+    producer = HqProducer(
+        cfg.hq_brokers, cfg.output_topic, declaration=declaration,
+        edge_brokers=dict(cfg.edge_clusters) if edge_mode else None,
+        edge_of=roster.edge_of if edge_mode else None,
+    )
     await producer.start()
 
     matched = cfg.all_matched_variants
@@ -309,9 +314,11 @@ def main() -> int:
     log.info("loading config from %s", config_path)
     cfg = SimConfig.load(config_path)
     log.info(
-        "logistics-sim starting -- profiles=%s tick=%ss output=%s edges=%s",
+        "logistics-sim starting -- profiles=%s tick=%ss output=%s edges=%s "
+        "element_publish_tier=%s",
         [p.name for p in cfg.profiles], cfg.tick_interval_s,
         cfg.output_topic, list(cfg.edge_clusters.keys()),
+        cfg.element_publish_tier,
     )
     try:
         return asyncio.run(_serve(cfg))

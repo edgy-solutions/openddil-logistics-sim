@@ -83,6 +83,9 @@ class AssetRoster:
 
     def __init__(self) -> None:
         self._assets: dict[str, AssetState] = {}
+        # asset_id -> edge that last reported it. Last report wins; an
+        # upsert without an edge id leaves the known owner in place.
+        self._edges: dict[str, str] = {}
         self._changed_event: asyncio.Event | None = None
 
     @property
@@ -100,7 +103,9 @@ class AssetRoster:
                 return True
         return False
 
-    def upsert(self, asset_id: str, state: AssetState) -> bool:
+    def upsert(
+        self, asset_id: str, state: AssetState, edge_id: str | None = None,
+    ) -> bool:
         """Returns True iff this is a NEW asset (first sight). Used by
         discovery to log discoveries without spamming on every tick.
 
@@ -113,10 +118,16 @@ class AssetRoster:
         prev = self._assets.get(asset_id)
         is_new = prev is None
         self._assets[asset_id] = state
+        if edge_id is not None:
+            self._edges[asset_id] = edge_id
         if self._changed_event is not None:
             if is_new or self._is_tier_change(prev, state):
                 self._changed_event.set()
         return is_new
+
+    def edge_of(self, asset_id: str) -> str | None:
+        """Edge that most recently reported this asset, or None."""
+        return self._edges.get(asset_id)
 
     def snapshot(self) -> dict[str, AssetState]:
         """Frozen view for the tick loop. Returns a shallow copy so a
@@ -396,7 +407,7 @@ async def run_edge_discovery(
             # frozen; use dataclasses.replace.
             if canonical != native_variant:
                 state = dataclasses.replace(state, platform_variant=canonical)
-            is_new = roster.upsert(asset_id, state)
+            is_new = roster.upsert(asset_id, state, edge_id)
             if is_new:
                 if canonical != native_variant:
                     log.info(
