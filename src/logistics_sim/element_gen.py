@@ -378,6 +378,9 @@ class ElementTelemetry:
     rx_active: bool = True
     # Which condition sources lifted or silenced this element; set only
     # when the condition drove synthesis, never under the legacy fallback.
+    # A lifted element carries it only if it reads above the profile's own
+    # nominal range AND in a raised band after the parent cap, so the card
+    # never says "moved by" on an element it draws as nominal.
     moved_by: str | None = None
 
 
@@ -520,10 +523,6 @@ def generate_snapshot(
         tier_yellow = synthesis.failed_yellow_fraction
         tier_red    = synthesis.failed_red_fraction
 
-    # Elements whose roll landed in a lifted band, so _build_node can stamp
-    # moved_by on exactly them. Only filled when a condition drives the tier.
-    lifted: set[str] = set()
-
     def _synth_health(elem_id: str, parent_health: float | None) -> float:
         # Tick-invariant seed: same element always gets the same health
         # roll, so tier colors don't flop between ticks. Per-tier
@@ -541,8 +540,6 @@ def generate_snapshot(
         # Layered: red band wins if roll lands in [0, tier_red);
         # yellow band next if roll lands in [tier_red, tier_red +
         # tier_yellow). Everything else (the majority) stays nominal.
-        if cond_active and roll < tier_red + tier_yellow:
-            lifted.add(elem_id)
         if roll < tier_red:
             # Start just above the threshold: health is rounded to 4 places
             # on output, and a draw within 5e-5 of 0.97 would round to
@@ -578,16 +575,22 @@ def generate_snapshot(
         rx_active = asset_rx if (depth == 0 or is_power_off) else True
         # tx/rx forced off by the condition tier (not by the feed's own flags).
         forced_off = cond_active and (is_power_off or (is_sensor_failed and depth == 0))
+        out_health = round(max(0.0, min(1.0, health)), 4)
+        # Moved by the condition: the output reads in a raised band and above
+        # the profile's own nominal range (only the condition, directly or via
+        # the at-least-one promotion, can put it there), or it was forced off.
+        # Judged on the output so a roll the parent cap pulled back is not tagged.
+        lifted_out = out_health > _TIER_DEGRADED and out_health > synthesis.health_nominal_max
         out.append(ElementTelemetry(
             element_id=elem_id,
             layer_depth=depth,
             layer_name=layer_name,
-            health=round(max(0.0, min(1.0, health)), 4),
+            health=out_health,
             temp_c=round(temp_c, 2),
             load_pct=round(load_pct, 1),
             tx_active=tx_active,
             rx_active=rx_active,
-            moved_by=moved_by if (cond_active and (elem_id in lifted or forced_off)) else None,
+            moved_by=moved_by if (cond_active and (lifted_out or forced_off)) else None,
         ))
 
     def _recurse(parent_id: str | None, parent_health: float | None, depth: int) -> None:

@@ -360,3 +360,71 @@ def test_condition_knobs_default_and_override(tmp_path: Path) -> None:
     s = _load(tmp_path, {"critical_yellow_fraction": 0.4, "critical_red_fraction": 0.3,
                          "destroyed_red_fraction": 0.9})
     assert (s.critical_yellow_fraction, s.critical_red_fraction, s.destroyed_red_fraction) == (0.4, 0.3, 0.9)
+
+
+# 4b. moved_by judged on the output health --------------------------
+
+LAYERS3 = (
+    LayerSpec(name="RADAR UNIT", prefix="TR", cols=0, rows=0),
+    LayerSpec(name="BACKPLANE", prefix="BOARD", cols=2, rows=2),
+    LayerSpec(name="PROCESSOR BANK", prefix="MODULE", cols=2, rows=2),
+    LayerSpec(name="CHIP", prefix="CHIP", cols=2, rows=2),
+)
+FACES3 = (FaceSpec(name="PRIMARY APERTURE", cols=12, rows=8),)
+
+
+def _snap3(state: AssetState, knobs: SynthesisKnobs | None = None):
+    return generate_snapshot(
+        asset_id="dis:1:1:1008", asset_state=state, layers=LAYERS3, faces=FACES3,
+        synthesis=knobs or _knobs(), tick_bucket=7,
+        degraded_power_states=DEGRADED_POWER, degraded_health_states=DEGRADED_HEALTH,
+    )
+
+
+@pytest.mark.parametrize("level", ["DEGRADED", "CRITICAL"])
+def test_moved_by_iff_output_health_is_raised(level) -> None:
+    snap = _snap3(_state(_cond(level)))
+    raised = {e.element_id for e in snap if e.health > 0.90}
+    tagged = {e.element_id for e in snap if e.moved_by == "emission"}
+    assert raised and raised == tagged
+    # the parent cap really did pull rolls back: more rolls lifted than survive
+    assert len(snap) > len(tagged)
+
+
+def test_sensor_failed_moved_by_is_raised_or_forced_off() -> None:
+    snap = _snap3(_state(_cond("SENSOR_FAILED")))
+    for e in snap:
+        forced = e.layer_depth == 0 and not e.tx_active
+        assert (e.moved_by == "emission") == (e.health > 0.90 or forced)
+
+
+@pytest.mark.parametrize("level", ["NOT_EMITTING", "DEACTIVATED"])
+def test_forced_off_tiers_tag_every_element(level) -> None:
+    snap = _snap3(_state(_cond(level)))
+    assert all(e.moved_by == "emission" for e in snap)
+
+
+def test_no_condition_tags_nothing_on_large_profile() -> None:
+    snap = _snap3(_state(None, health_state="HEALTH_STATE_DEGRADED"))
+    assert _lifted(snap)
+    assert all(e.moved_by is None for e in snap)
+
+
+# Health lists recorded from the function before the stamping change; the
+# stamping must never touch health. Level -> md5 of repr(list of health).
+_HEALTH_SUMS = {
+    "NOMINAL": "8d3882c6bd5a",
+    "DEGRADED": "620750bea659",
+    "CRITICAL": "4228f1f46637",
+    "SENSOR_FAILED": "4228f1f46637",
+    "NOT_EMITTING": "8d3882c6bd5a",
+    "DESTROYED": "c1c5cb26ce4f",
+}
+
+
+@pytest.mark.parametrize("level", sorted(_HEALTH_SUMS))
+def test_health_values_unchanged_by_moved_by_rule(level) -> None:
+    import hashlib
+    snap = _snap3(_state(_cond(level)))
+    got = hashlib.md5(repr([e.health for e in snap]).encode()).hexdigest()[:12]
+    assert got == _HEALTH_SUMS[level]
