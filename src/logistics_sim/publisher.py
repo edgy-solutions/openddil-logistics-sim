@@ -86,7 +86,7 @@ from typing import Callable
 
 from aiokafka import AIOKafkaProducer
 
-from .config import PartsAvailabilityConfig, spare_picture
+from .config import FieldingConfig, PartsAvailabilityConfig, spare_picture
 from .element_gen import AssetState, ElementTelemetry
 from .releasability import ReleasabilityDeclaration
 
@@ -141,6 +141,7 @@ class HqProducer:
         declaration: ReleasabilityDeclaration | None = None,
         edge_brokers: dict[str, str] | None = None,
         edge_of: Callable[[str], str | None] | None = None,
+        fielding_edges: dict[str, str] | None = None,
     ) -> None:
         self._brokers = brokers
         self._topic = topic
@@ -159,6 +160,10 @@ class HqProducer:
         self._edge_of = edge_of
         self._edge_producers: dict[str, AIOKafkaProducer] = {}
         self._warned_unrouted: set[str] = set()
+        # edge_id -> brokers for the edges the fielding stand-in names.
+        # Fielding always goes to the record's own edge broker, even in hq
+        # mode, so these get producers regardless of element_publish_tier.
+        self._fielding_edges = fielding_edges or {}
 
     @property
     def edge_mode(self) -> bool:
@@ -201,7 +206,9 @@ class HqProducer:
             "HQ producer started (brokers=%s element_topic=%s inventory_topic=%s)",
             self._brokers, self._topic, self._inventory_topic,
         )
-        for edge_id, brokers in (self._edge_brokers or {}).items():
+        to_open = dict(self._fielding_edges)
+        to_open.update(self._edge_brokers or {})
+        for edge_id, brokers in to_open.items():
             producer = self._new_kafka_producer(brokers)
             await producer.start()
             self._edge_producers[edge_id] = producer
@@ -372,6 +379,55 @@ class HqProducer:
                 self._inventory_topic, value=payload, key=key,
             )
             published += 1
+        return published
+
+    async def publish_fielding(self, cfg: FieldingConfig) -> int:
+        """Fielding stand-in (Contract B fielding plane, ADR-0050 section 4):
+        one record per `cfg.records` entry, keyed by serial, sent to
+        `cfg.topic` on the broker of the record's own site -- never HQ.
+
+        observed_at_ns, extracted_at_ns and the cursor are taken ONCE per
+        call, as in parts. The record carries no asset_id, no
+        sustainment_id and no extras; labels sit under `provenance`.
+        A per-record send failure (or a site with no producer) is logged
+        and skipped. Returns the count of records actually sent."""
+        sweep_ns = time.time_ns()
+        published = 0
+        for rec in cfg.records:
+            producer = self._edge_producers.get(rec.site)
+            if producer is None:
+                log.error(
+                    "fielding: no edge producer for site %s (serial %s); "
+                    "skipping this record", rec.site, rec.serial,
+                )
+                continue
+            record = {
+                "serial": rec.serial,
+                "platform_variant": rec.platform_variant,
+                "unit": rec.unit,
+                "site": rec.site,
+                "due_by_ns": rec.due_by_ns,
+                "observed_at_ns": sweep_ns,
+                "provenance": {
+                    "originator_nation": rec.owning_nation,
+                    "releasable_to": list(rec.releasable_to),
+                },
+                "extraction": {
+                    "cursor": f"sweep-{sweep_ns}",
+                    "extracted_at_ns": sweep_ns,
+                },
+            }
+            payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
+            try:
+                await producer.send_and_wait(
+                    cfg.topic, value=payload, key=rec.serial.encode("utf-8"),
+                )
+                published += 1
+            except Exception:
+                log.exception(
+                    "fielding publish failed for %s at %s; skipping this "
+                    "record", rec.serial, rec.site,
+                )
         return published
 
     async def publish_parts_availability(self, cfg: PartsAvailabilityConfig) -> int:

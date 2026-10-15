@@ -221,3 +221,23 @@ parts_availability:
       # Stand-in lead-time figures (days to ship to a requesting tier),
       # not measurements from a real logistics system.
       lead_time_days: {edge-01: 1, edge-02: 1, region-east: 3, hq: 7}
+
+# =============================================================================
+# Fielding stand-in (Contract B fielding plane, topic asset-fielding)
+# =============================================================================
+# Optional. Absent or empty: no loop runs and nothing is published. Each
+# record goes to its own `site` edge broker (a key of the configured edge
+# clusters), never to HQ. `due_by` is an absolute RFC3339 time, never
+# relative to start, so a restart never moves it. Example:
+#
+# fielding:
+#   topic: asset-fielding
+#   interval_s: 60
+#   records:
+#     - serial: SN-2001
+#       platform_variant: VARIANT_X
+#       unit: unit-a
+#       site: edge-01
+#       owning_nation: ATL
+#       releasable_to: []
+#       due_by: "2026-10-22T00:00:00Z"

@@ -209,6 +209,31 @@ async def _parts_availability_loop(cfg: SimConfig, producer: HqProducer) -> None
         await asyncio.sleep(pa_cfg.interval_s)
 
 
+async def _fielding_loop(cfg: SimConfig, producer: HqProducer) -> None:
+    """Publishes the fielding stand-in (Contract B fielding plane) on its
+    own cadence: once immediately, then every `fielding.interval_s`. Each
+    record goes to its own site's edge broker. Started only when records
+    are configured. A failed iteration is logged and retried next interval."""
+    f_cfg = cfg.fielding
+    log.info(
+        "fielding loop starting (interval=%.1fs, topic=%s, records=%d)",
+        f_cfg.interval_s, f_cfg.topic, len(f_cfg.records),
+    )
+    while True:
+        try:
+            published = await producer.publish_fielding(f_cfg)
+            log.info(
+                "fielding: published %d record(s) to %s",
+                published, f_cfg.topic,
+            )
+        except asyncio.CancelledError:
+            log.info("fielding loop cancelled")
+            raise
+        except Exception:
+            log.exception("fielding publish iteration failed; will retry")
+        await asyncio.sleep(f_cfg.interval_s)
+
+
 def _clock() -> float:
     import time
     return time.time()
@@ -230,6 +255,9 @@ async def _serve(cfg: SimConfig) -> int:
         cfg.hq_brokers, cfg.output_topic, declaration=declaration,
         edge_brokers=dict(cfg.edge_clusters) if edge_mode else None,
         edge_of=roster.edge_of if edge_mode else None,
+        fielding_edges={
+            r.site: cfg.edge_clusters[r.site] for r in cfg.fielding.records
+        },
     )
     await producer.start()
 
@@ -271,6 +299,10 @@ async def _serve(cfg: SimConfig) -> int:
     tasks.append(asyncio.create_task(
         _parts_availability_loop(cfg, producer), name="parts-availability-loop",
     ))
+    if cfg.fielding.records:
+        tasks.append(asyncio.create_task(
+            _fielding_loop(cfg, producer), name="fielding-loop",
+        ))
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()

@@ -16,6 +16,7 @@ synthesize for things it doesn't have a layout for.
 from __future__ import annotations
 
 import dataclasses
+import datetime as _dt
 import os
 from pathlib import Path
 from typing import Any
@@ -343,6 +344,118 @@ def _parse_parts_availability(
 
 
 @dataclasses.dataclass(frozen=True)
+class FieldingRecord:
+    """One `fielding.records[]` entry: a serialized item with a due date
+    at a unit, fielded to an edge site (ADR-0050 section 4). `due_by_ns`
+    is the absolute due date, parsed once at load."""
+    serial: str
+    platform_variant: str
+    unit: str
+    site: str
+    owning_nation: str
+    releasable_to: tuple[str, ...]
+    due_by_ns: int
+
+
+@dataclasses.dataclass(frozen=True)
+class FieldingConfig:
+    """Fielding stand-in config (Contract B fielding plane, topic
+    `asset-fielding`). Empty `records` means no loop runs and nothing is
+    published."""
+    topic: str = "asset-fielding"
+    interval_s: float = 60.0
+    records: tuple[FieldingRecord, ...] = ()
+
+
+def _parse_due_by_ns(value: Any) -> int | None:
+    """RFC3339 (or a YAML-parsed timestamp) -> integer ns since the epoch,
+    or None when it does not parse or carries no UTC offset. Absolute by
+    construction: a naive time would depend on the host zone."""
+    if isinstance(value, _dt.datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = _dt.datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    delta = parsed - _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000_000
+            + delta.microseconds * 1000)
+
+
+def _parse_fielding(
+    raw: dict[str, Any], path: str | os.PathLike[str],
+    edge_clusters: dict[str, str],
+) -> FieldingConfig:
+    f_raw = raw.get("fielding") or {}
+    topic = str(f_raw.get("topic", "asset-fielding"))
+    interval_s = float(f_raw.get("interval_s", 60))
+    rows = f_raw.get("records") or []
+    if interval_s <= 0:
+        raise ValueError(
+            f"{path}: fielding.interval_s must be > 0, got {interval_s!r}"
+        )
+
+    def _nonempty(v: Any) -> bool:
+        return isinstance(v, str) and v.strip() != ""
+
+    records: list[FieldingRecord] = []
+    seen: set[str] = set()
+    for i, row in enumerate(rows):
+        row = row or {}
+        serial = row.get("serial")
+        name = f"{path}: fielding.records[{i}] (serial={serial!r})"
+        if not _nonempty(serial) or serial.strip() in ("none", "None", "NONE"):
+            raise ValueError(f"{name}: serial must be a non-empty value, not 'none'")
+        if serial in seen:
+            raise ValueError(f"{name}: duplicate serial")
+        seen.add(serial)
+        variant, unit = row.get("platform_variant"), row.get("unit")
+        if not _nonempty(variant):
+            raise ValueError(f"{name}: platform_variant must be non-empty")
+        if not _nonempty(unit):
+            raise ValueError(f"{name}: unit must be non-empty")
+        site = row.get("site")
+        if site not in edge_clusters:
+            raise ValueError(
+                f"{name}: site {site!r} is not a configured edge cluster "
+                f"({sorted(edge_clusters)})"
+            )
+        nation = row.get("owning_nation")
+        if not _nonempty(nation):
+            raise ValueError(f"{name}: owning_nation must be non-empty")
+        releasable = row.get("releasable_to", [])
+        if (not isinstance(releasable, list)
+                or not all(_nonempty(r) for r in releasable)):
+            raise ValueError(
+                f"{name}: releasable_to must be a list of non-empty strings"
+            )
+        if nation in releasable:
+            raise ValueError(
+                f"{name}: releasable_to must not contain owning_nation "
+                f"{nation!r}"
+            )
+        due_by_ns = _parse_due_by_ns(row.get("due_by"))
+        if due_by_ns is None:
+            raise ValueError(
+                f"{name}: due_by {row.get('due_by')!r} is not an absolute "
+                "RFC3339 timestamp"
+            )
+        records.append(FieldingRecord(
+            serial=serial, platform_variant=variant, unit=unit, site=site,
+            owning_nation=nation, releasable_to=tuple(releasable),
+            due_by_ns=due_by_ns,
+        ))
+    return FieldingConfig(
+        topic=topic, interval_s=interval_s, records=tuple(records),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class SimConfig:
     tick_interval_s: float
     output_topic: str
@@ -380,6 +493,10 @@ class SimConfig:
     # fails start, same "validate on load" posture as the rest of
     # this file.
     parts_availability: PartsAvailabilityConfig
+
+    # Fielding stand-in (Contract B fielding plane). Absent block loads to
+    # no records: no loop, nothing published.
+    fielding: FieldingConfig = FieldingConfig()
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "SimConfig":
@@ -456,6 +573,7 @@ class SimConfig:
             releasability_path=releasability_path,
             site_nation=site_nation,
             parts_availability=_parse_parts_availability(raw, path),
+            fielding=_parse_fielding(raw, path, edge_clusters),
         )
 
     def profile_for_variant(self, platform_variant: str) -> AssetProfile | None:
