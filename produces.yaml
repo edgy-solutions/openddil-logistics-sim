@@ -11,3 +11,8 @@ workloads:
       - asset-element-inventory
       - asset-fielding
       - "${LOGISTICS_SIM_PARTS_AVAILABILITY_TOPIC:-parts-availability}"
+    # when: <topic>: "@config:<KEY>:<dotted.path>" -- produced only when the config file at env KEY's path holds a
+    # non-empty value at that path. main.py starts the fielding loop only `if cfg.fielding.records`, so the helm
+    # check drops asset-fielding from a sim whose rendered config lists no fielding records.
+    when:
+      asset-fielding: "@config:LOGISTICS_SIM_CONFIG_PATH:fielding.records"

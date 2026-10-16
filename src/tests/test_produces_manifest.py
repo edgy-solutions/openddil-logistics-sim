@@ -172,3 +172,23 @@ def test_annotations_equal_the_loaded_config(monkeypatch):
            for fn, (_, note) in sorted(sites.items())
            if not note or pm.expand(note, ENV) != topics[fn]]
     assert not bad, "\n".join(bad)
+
+
+def test_the_fielding_gate_is_the_code_gate():
+    """produces.yaml's `when:` for asset-fielding must be the code's own gate: main.py reads the config from
+    LOGISTICS_SIM_CONFIG_PATH and starts _fielding_loop only under `if cfg.fielding.records:` (that the loader
+    fills records from the file's fielding.records is test_fielding.py's test_loop_gate_is_on_records)."""
+    assert MANIFEST["logistics-sim"].get("when") == {
+        "asset-fielding": "@config:LOGISTICS_SIM_CONFIG_PATH:fielding.records"}
+    tree = ast.parse((ROOT / "src" / "logistics_sim" / "main.py").read_text(encoding="utf-8"))
+    assert any(isinstance(n, ast.Constant) and n.value == "LOGISTICS_SIM_CONFIG_PATH" for n in ast.walk(tree))
+    parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_fielding_loop"]
+    assert calls, "main.py no longer calls _fielding_loop"
+    for call in calls:
+        node = call
+        while node in parent and not isinstance(node, ast.If):
+            node = parent[node]
+        assert isinstance(node, ast.If) and ast.unparse(node.test) == "cfg.fielding.records", (
+            f"main.py:{call.lineno}: _fielding_loop is not gated on cfg.fielding.records")
