@@ -1,0 +1,23 @@
+name: Tests
+
+# The produces manifest (produces.yaml) must equal what the logistics-sim code can write,
+# so a new send site or topic fails here in the PR that adds it.
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The test is an AST scan: it imports nothing from the service, only pyyaml.
+      - name: Install
+        run: pip install pytest "pyyaml>=6.0"
+      - name: produces manifest equals the code
+        run: python -m pytest -q src/tests/test_produces_manifest.py

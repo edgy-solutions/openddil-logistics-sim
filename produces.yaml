@@ -1,0 +1,13 @@
+# produces.yaml -- every Kafka topic this repo's workloads can write, as templates over the workload's environment.
+# Checked against the code by src/tests/test_produces_manifest.py and against the chart by
+# openddil-helm scripts/check-produces-declarations.py.
+workloads:
+  logistics-sim:
+    image: openddil/logistics-sim
+    topics:
+      # Names come from config/default.yaml (output_topic, fielding topic) or a constructor default; only the
+      # parts-availability topic has an env override.
+      - asset-element-telemetry
+      - asset-element-inventory
+      - asset-fielding
+      - "${LOGISTICS_SIM_PARTS_AVAILABILITY_TOPIC:-parts-availability}"

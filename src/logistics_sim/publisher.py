@@ -294,6 +294,7 @@ class HqProducer:
         target = self._snapshot_target(asset_id)
         if target is None:
             return
+        # produces: asset-element-telemetry
         await target.send_and_wait(
             self._topic, value=payload, key=asset_id.encode("utf-8"),
         )
@@ -376,6 +377,7 @@ class HqProducer:
             # add-only at the broker, the projector handles deduplication
             # via upsert on id) but keying right is free insurance.
             key = f"{asset_id}:{layer_name}".encode("utf-8")
+            # produces: asset-element-inventory
             await self._producer.send_and_wait(
                 self._inventory_topic, value=payload, key=key,
             )
@@ -420,6 +422,7 @@ class HqProducer:
             }
             payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
             try:
+                # produces: asset-fielding
                 await producer.send_and_wait(
                     cfg.topic, value=payload, key=rec.serial.encode("utf-8"),
                 )
@@ -531,6 +534,7 @@ class HqProducer:
                 payload = json.dumps(record, separators=(",", ":")).encode("utf-8")
                 key = f"{site}:{part.part_ref}".encode("utf-8")
                 try:
+                    # produces: "${LOGISTICS_SIM_PARTS_AVAILABILITY_TOPIC:-parts-availability}"
                     await self._producer.send_and_wait(
                         cfg.topic, value=payload, key=key,
                     )
