@@ -258,3 +258,14 @@ def test_releasability_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.Mo
     cfg = SimConfig.load(f)
     assert cfg.releasability_path == "/env/releasability.yaml"
     assert cfg.site_nation == "BDR"
+
+
+def test_edge_defaults_from_yaml_and_env(tmp_path: Path, monkeypatch) -> None:
+    yaml = _write_minimal_config(tmp_path, {"degraded_fraction": 0.15})
+    yaml.write_text(yaml.read_text() + "releasability_edge_defaults: {edge-01: ATL}\n")
+    monkeypatch.delenv("LOGISTICS_SIM_RELEASABILITY_EDGE_DEFAULTS", raising=False)
+    assert SimConfig.load(yaml).releasability_edge_defaults == {"edge-01": "ATL"}
+    monkeypatch.setenv("LOGISTICS_SIM_RELEASABILITY_EDGE_DEFAULTS", "edge-01=ATL, edge-02=BDR")
+    cfg = SimConfig.load(yaml)
+    assert cfg.releasability_edge_defaults == {"edge-01": "ATL", "edge-02": "BDR"}
+    assert cfg.declarations_topic == "asset-declarations"

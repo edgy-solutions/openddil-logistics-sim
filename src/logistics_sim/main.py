@@ -26,6 +26,7 @@ from aiokafka.errors import MessageSizeTooLargeError
 from .aliases import load_variant_aliases
 from .asset_discovery import AssetRoster, run_edge_discovery
 from .config import SimConfig
+from .declarations import run_declaration_consumer
 from .element_gen import cardinality, compute_asset_metrics, generate_snapshot
 from .publisher import HqProducer
 from .releasability import ReleasabilityDeclaration
@@ -243,6 +244,7 @@ async def _serve(cfg: SimConfig) -> int:
     roster = AssetRoster()
     declaration = ReleasabilityDeclaration.load(
         cfg.releasability_path, site_nation=cfg.site_nation,
+        edge_defaults=cfg.releasability_edge_defaults,
     )
     log.info(
         "releasability declaration loaded from %s -- %d asset(s) named; "
@@ -299,6 +301,16 @@ async def _serve(cfg: SimConfig) -> int:
     tasks.append(asyncio.create_task(
         _parts_availability_loop(cfg, producer), name="parts-availability-loop",
     ))
+    # Arrival declarations (ADR-0050) outrank every other label source.
+    # Best effort: the consumer logs and retries on its own, so a dead
+    # broker leaves labels on row/defaults and never blocks publishing.
+    if cfg.declarations_topic:
+        tasks.append(asyncio.create_task(
+            run_declaration_consumer(
+                cfg.hq_brokers, cfg.declarations_topic, declaration,
+            ),
+            name="declaration-consumer",
+        ))
     if cfg.fielding.records:
         tasks.append(asyncio.create_task(
             _fielding_loop(cfg, producer), name="fielding-loop",

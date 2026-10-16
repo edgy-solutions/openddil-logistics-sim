@@ -37,9 +37,11 @@ the customer sim reports.
 - **Releasability labelling** (`releasability.py`) — resolves each
   asset's `originator_nation` / `releasable_to` from the deployment's
   releasability declaration (`releasability_path`) and stamps them on
-  both published envelopes. An asset the declaration doesn't name
-  falls back to the deployment's `site_nation` if one is configured,
-  or gets no label at all.
+  both published envelopes. Precedence: a person's arrival
+  declaration (ADR-0050, read from the `asset-declarations` topic) >
+  the declaration's per-asset row > the owning edge's default
+  (`releasability_edge_defaults`) > the document default > the
+  deployment's `site_nation` > no label at all.
 
 ## Architecture
 
@@ -130,6 +132,8 @@ wiring above.
 |---|---|---|
 | `LOGISTICS_SIM_RELEASABILITY_PATH` | `releasability_path` | `/ontology/releasability.yaml` |
 | `LOGISTICS_SIM_SITE_NATION` | `site_nation` | `""` (unset) |
+| `LOGISTICS_SIM_RELEASABILITY_EDGE_DEFAULTS` | `releasability_edge_defaults` | `{}` (env form `edge-01=ATL,edge-02=BDR`) |
+| `LOGISTICS_SIM_DECLARATIONS_TOPIC` | `declarations_topic` | `asset-declarations` (`""` disables the feed) |
 
 ## Releasability labelling
 
@@ -138,7 +142,18 @@ wiring above.
 resolves each published asset to a `Label(originator_nation,
 releasable_to)`, in precedence order: the asset's own entry in the
 declaration, then the declaration's `default_originator_nation`, then
-the deployment's `site_nation`, then no label. A missing declaration
+the deployment's `site_nation`, then no label. Two sources sit around
+that: a person's arrival declaration (ADR-0050) outranks the row, and
+`releasability_edge_defaults` (edge id -> nation, each validated
+against the declaration's `nations` at load) sits between the row and
+the document default, because one process serves several edges and a
+single document default would mislabel any edge whose nation differs.
+The arrival declarations come from a background consumer
+(`declarations.py`) that reads `declarations_topic` from the HQ
+brokers, where every edge's declarations bridge up, from earliest at
+start; the compacted topic is keyed by `asset_id` and a tombstone
+retracts. If the broker can't be reached the consumer logs and retries
+and labels fall to row/defaults, so publishing is never blocked. A missing declaration
 file is not fatal — the sim runs unlabelled (or falls back to
 `site_nation`) and logs a warning rather than failing to start.
 

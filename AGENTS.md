@@ -52,7 +52,9 @@ Captured fixtures and docs-derived JSON **drift from what the live sim emits**.
 (env `LOGISTICS_SIM_RELEASABILITY_PATH`), falling back to
 `site_nation` (env `LOGISTICS_SIM_SITE_NATION`) for assets the
 declaration doesn't name, per the precedence rules documented in that
-module and in the declaration file's own header. Both fields land at
+module (arrival declaration > row > edge default > document default >
+`site_nation`; edge defaults are `releasability_edge_defaults`, arrival
+declarations come from `declarations.py`) and in the declaration file's own header. Both fields land at
 the top level of both published envelopes (element-telemetry snapshot
 and inventory) — but are **absent**, not empty/null, when no label
 resolves. Don't default that absence to a placeholder value; the gate

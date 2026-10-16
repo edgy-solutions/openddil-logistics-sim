@@ -3,9 +3,17 @@ Releasability labelling for logistics-sim's published envelopes.
 
 Loads the deployment's releasability declaration (see
 `openddil-demo/ontology/releasability.yaml` for the rules this file
-implements: per-asset declaration beats a document-wide default beats
-a per-deployment `site_nation`; an asset that matches none of those
-gets no label at all -- absence is deliberate, not an oversight). This
+implements). Precedence, highest first:
+
+  1. a person's arrival declaration (ADR-0050, the `asset-declarations`
+     topic; declarations.py feeds `set_arrival_declaration`)
+  2. the per-asset row in the declaration document's `assets`
+  3. the edge default (`releasability_edge_defaults`, edge -> nation):
+     this process serves several edges, so one document default cannot
+     be right for all of them
+  4. the document-wide `default_originator_nation`
+  5. the per-deployment `site_nation`
+  6. no label at all -- absence is deliberate, not an oversight. This
 module is one of that document's declared consumers; it resolves an
 `asset_id` to a `Label` (or `None`) for the publisher to attach to an
 envelope, and does nothing else -- it does not decide what a consumer
@@ -43,13 +51,21 @@ class ReleasabilityDeclaration:
         default_originator_nation: str | None,
         site_nation: str | None,
         unavailable_reason: str | None = None,
+        edge_defaults: dict[str, str] | None = None,
     ) -> None:
         self._assets = assets
+        self._edge_defaults = dict(edge_defaults or {})
+        # asset_id -> Label from arrival declarations. Mutated by the
+        # background consumer on the event loop; reads are single dict
+        # lookups, so no lock.
+        self._arrival: dict[str, Label] = {}
         self._default_originator_nation = default_originator_nation
         self._site_nation = site_nation or None
         self._unavailable_reason = unavailable_reason
         self._counts: dict[str, int] = {
+            "arrival_declared": 0,
             "declared": 0,
+            "edge_default": 0,
             "document_default": 0,
             "site_default": 0,
             "unlabelled": 0,
@@ -62,6 +78,7 @@ class ReleasabilityDeclaration:
     @classmethod
     def load(
         cls, path: str | os.PathLike[str], site_nation: str | None = None,
+        edge_defaults: dict[str, str] | None = None,
     ) -> "ReleasabilityDeclaration":
         try:
             with open(path, "rt") as f:
@@ -79,6 +96,7 @@ class ReleasabilityDeclaration:
                 default_originator_nation=None,
                 site_nation=site_nation,
                 unavailable_reason=f"file not found: {path}",
+                edge_defaults=edge_defaults,
             )
 
         nations = set((raw.get("nations") or {}).keys())
@@ -94,6 +112,13 @@ class ReleasabilityDeclaration:
             raise ValueError(
                 f"{path}: site_nation {site_nation!r} is not in nations {sorted(nations)}"
             )
+
+        for edge_id, nation in (edge_defaults or {}).items():
+            if nation not in nations:
+                raise ValueError(
+                    f"{path}: releasability_edge_defaults[{edge_id!r}] "
+                    f"{nation!r} is not in nations {sorted(nations)}"
+                )
 
         assets: dict[str, Label] = {}
         for asset_id, row in (raw.get("assets") or {}).items():
@@ -123,11 +148,12 @@ class ReleasabilityDeclaration:
         # mount, and nothing said a word. Refuse instead.
         #
         # A document-wide default labels every asset, so a file that sets
-        # one and names no assets individually has declared something. Only
-        # neither is a refusal. A MISSING file is a different fact and keeps
+        # one and names no assets individually has declared something; so do
+        # edge defaults, which label every asset of the edges they name. Only
+        # none of the three is a refusal. A MISSING file is a different fact and keeps
         # its warning above: a deployment may legitimately have no
         # declaration, but one that has authored a file has said it does.
-        if not assets and not default_originator_nation:
+        if not assets and not default_originator_nation and not edge_defaults:
             raise ValueError(
                 f"{path}: the declaration is present and labels nobody -- "
                 f"`assets` is empty and `default_originator_nation` is unset. "
@@ -140,6 +166,7 @@ class ReleasabilityDeclaration:
             assets=assets,
             default_originator_nation=default_originator_nation,
             site_nation=site_nation,
+            edge_defaults=edge_defaults,
         )
 
     @classmethod
@@ -154,11 +181,33 @@ class ReleasabilityDeclaration:
             unavailable_reason=reason,
         )
 
-    def label_for(self, asset_id: str) -> Label | None:
+    def set_arrival_declaration(self, asset_id: str, label: Label | None) -> None:
+        """Record (or, with None, retract) a person's arrival declaration."""
+        if label is None:
+            self._arrival.pop(asset_id, None)
+        else:
+            self._arrival[asset_id] = label
+
+    @property
+    def arrival_count(self) -> int:
+        return len(self._arrival)
+
+    def label_for(self, asset_id: str, edge_id: str | None = None) -> Label | None:
+        arrival = self._arrival.get(asset_id)
+        if arrival is not None:
+            self._counts["arrival_declared"] += 1
+            return arrival
+
         declared = self._assets.get(asset_id)
         if declared is not None:
             self._counts["declared"] += 1
             return declared
+
+        if edge_id is not None:
+            edge_nation = self._edge_defaults.get(edge_id)
+            if edge_nation:
+                self._counts["edge_default"] += 1
+                return Label(edge_nation, ())
 
         if self._default_originator_nation is not None:
             self._counts["document_default"] += 1

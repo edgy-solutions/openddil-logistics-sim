@@ -178,7 +178,8 @@ class HqProducer:
         must not emit a placeholder for the unlabelled case."""
         if self._declaration is None:
             return {}
-        label = self._declaration.label_for(asset_id)
+        edge_id = self._edge_of(asset_id) if self._edge_of is not None else None
+        label = self._declaration.label_for(asset_id, edge_id)
         if label is None:
             return {}
         return {

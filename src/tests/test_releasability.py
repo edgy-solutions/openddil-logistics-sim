@@ -337,9 +337,127 @@ assets: {}
     assert decl.label_for("dis:9:9:9999").originator_nation == "ATL"
 
 
+def test_edge_defaults_alone_are_not_refused(tmp_path: Path) -> None:
+    """Edge defaults label every asset of the edges they name, so a file
+    with no rows and no document default has still declared something."""
+    path = _write_declaration(tmp_path, _BASE_NATIONS + """
+default_originator_nation: null
+assets: {}
+""")
+    decl = ReleasabilityDeclaration.load(
+        path, edge_defaults={"edge-01": "ATL", "edge-02": "BDR"})
+    assert decl.label_for("dis:9:9:9999", "edge-02").originator_nation == "BDR"
+    assert decl.label_for("dis:9:9:9999", "edge-09") is None
+
+
 def test_missing_file_is_not_the_same_as_labelling_nobody(tmp_path: Path) -> None:
     """A deployment may legitimately have no declaration. One that has
     AUTHORED a file has said it does, which is why only the second refuses."""
     decl = ReleasabilityDeclaration.load(tmp_path / "absent.yaml")
     assert decl.asset_count == 0
     assert decl.label_for("dis:9:9:9999") is None
+
+
+# ---------------------------------------------------------------------------
+# Full precedence: arrival declaration > row > edge default > document
+# default > site_nation > none
+# ---------------------------------------------------------------------------
+
+_PRECEDENCE_DOC = _BASE_NATIONS + """
+default_originator_nation: ATL
+assets:
+  "row-asset": { originator_nation: BDR, releasable_to: [ATL] }
+"""
+_EDGES = {"edge-01": "ATL", "edge-02": "BDR"}
+
+
+def test_precedence_table(tmp_path: Path) -> None:
+    path = _write_declaration(tmp_path, _PRECEDENCE_DOC)
+    decl = ReleasabilityDeclaration.load(path, site_nation="ATL", edge_defaults=_EDGES)
+    decl.set_arrival_declaration("both", Label("ATL", ("BDR",)))
+    decl.set_arrival_declaration("row-asset", Label("ATL", ()))
+
+    # declared beats row
+    assert decl.label_for("row-asset", "edge-02") == Label("ATL", ())
+    # declared beats edge default
+    assert decl.label_for("both", "edge-02") == Label("ATL", ("BDR",))
+    # row beats edge default
+    assert decl.set_arrival_declaration("row-asset", None) is None
+    assert decl.label_for("row-asset", "edge-01") == Label("BDR", ("ATL",))
+    # edge default beats document default (doc default is ATL; edge-02 is BDR)
+    assert decl.label_for("other", "edge-02") == Label("BDR", ())
+    # unknown edge / no edge falls through to document default
+    assert decl.label_for("other", "edge-99") == Label("ATL", ())
+    assert decl.label_for("other") == Label("ATL", ())
+    c = decl.counts
+    assert (c["arrival_declared"], c["declared"], c["edge_default"],
+            c["document_default"]) == (2, 1, 1, 2)
+
+
+def test_edge_default_beats_site_nation_and_site_beats_none(tmp_path: Path) -> None:
+    path = _write_declaration(tmp_path, _BASE_NATIONS + """
+assets:
+  "row-asset": { originator_nation: ATL, releasable_to: [] }
+""")
+    decl = ReleasabilityDeclaration.load(path, site_nation="ATL", edge_defaults=_EDGES)
+    assert decl.label_for("x", "edge-02") == Label("BDR", ())
+    assert decl.label_for("x", "edge-99") == Label("ATL", ())
+    assert decl.counts["site_default"] == 1
+    bare = ReleasabilityDeclaration.load(path)
+    assert bare.label_for("x", "edge-01") is None
+
+
+def test_tombstone_retracts_arrival_declaration(tmp_path: Path) -> None:
+    path = _write_declaration(tmp_path, _PRECEDENCE_DOC)
+    decl = ReleasabilityDeclaration.load(path)
+    decl.set_arrival_declaration("row-asset", Label("ATL", ()))
+    assert decl.label_for("row-asset") == Label("ATL", ())
+    decl.set_arrival_declaration("row-asset", None)
+    assert decl.label_for("row-asset") == Label("BDR", ("ATL",))
+
+
+def test_bad_nation_in_edge_defaults_refused(tmp_path: Path) -> None:
+    path = _write_declaration(tmp_path, _PRECEDENCE_DOC)
+    with pytest.raises(ValueError, match="edge-01"):
+        ReleasabilityDeclaration.load(path, edge_defaults={"edge-01": "ZZZ"})
+
+
+def test_publisher_passes_owning_edge(tmp_path: Path) -> None:
+    path = _write_declaration(tmp_path, _BASE_NATIONS + """
+assets:
+  "row-asset": { originator_nation: ATL, releasable_to: [] }
+""")
+    decl = ReleasabilityDeclaration.load(path, edge_defaults=_EDGES)
+    producer = HqProducer(
+        "hq:9092", "t", declaration=decl,
+        edge_brokers={"edge-01": "e1:9092", "edge-02": "e2:9092"},
+        edge_of=lambda a: "edge-02" if a == "x" else None,
+    )
+    assert producer._label_fields("x") == {
+        "originator_nation": "BDR", "releasable_to": [],
+    }
+    assert producer._label_fields("y") == {}
+
+
+# ---------------------------------------------------------------------------
+# Declaration feed (no broker): record -> arrival map
+# ---------------------------------------------------------------------------
+
+def test_declaration_feed_apply_and_tombstone(tmp_path: Path) -> None:
+    from logistics_sim.declarations import apply_record
+
+    decl = ReleasabilityDeclaration.load(
+        _write_declaration(tmp_path, _PRECEDENCE_DOC))
+    body = json.dumps({"originator_nation": "BDR", "releasable_to": ["ATL"]}).encode()
+    apply_record(decl, b"a1", body)
+    assert decl.label_for("a1") == Label("BDR", ("ATL",))
+    # garbage leaves the prior declaration in place
+    apply_record(decl, b"a1", b"not json")
+    assert decl.label_for("a1") == Label("BDR", ("ATL",))
+    # tombstone removes it; falls to document default
+    apply_record(decl, b"a1", None)
+    assert decl.label_for("a1") == Label("ATL", ())
+    assert decl.arrival_count == 0
+    # keyless record ignored
+    apply_record(decl, None, body)
+    assert decl.arrival_count == 0

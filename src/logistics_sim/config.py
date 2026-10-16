@@ -498,6 +498,15 @@ class SimConfig:
     # no records: no loop, nothing published.
     fielding: FieldingConfig = FieldingConfig()
 
+    # edge_id -> nation. One process serves several edges, so a single
+    # document default would mislabel every edge whose nation differs.
+    # Validated against the declaration's `nations` at load (see
+    # ReleasabilityDeclaration.load).
+    releasability_edge_defaults: dict[str, str] = dataclasses.field(default_factory=dict)
+    # Topic of arrival declarations (ADR-0050), read from hq_brokers, where
+    # every edge's declarations bridge up. "" disables the consumer.
+    declarations_topic: str = "asset-declarations"
+
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "SimConfig":
         with open(path, "rt") as f:
@@ -547,6 +556,28 @@ class SimConfig:
             str(raw.get("site_nation", "")),
         )
 
+        # Env form: "edge-01=ATL,edge-02=BDR".
+        edge_defaults_env = os.environ.get("LOGISTICS_SIM_RELEASABILITY_EDGE_DEFAULTS")
+        releasability_edge_defaults: dict[str, str] = {}
+        if edge_defaults_env is not None:
+            for pair in filter(None, (p.strip() for p in edge_defaults_env.split(","))):
+                edge, _, nation = pair.partition("=")
+                if not edge.strip() or not nation.strip():
+                    raise ValueError(
+                        f"LOGISTICS_SIM_RELEASABILITY_EDGE_DEFAULTS: bad pair "
+                        f"{pair!r} (want edge=NATION)"
+                    )
+                releasability_edge_defaults[edge.strip()] = nation.strip()
+        else:
+            releasability_edge_defaults = {
+                str(k): str(v)
+                for k, v in (raw.get("releasability_edge_defaults") or {}).items()
+            }
+        declarations_topic = os.environ.get(
+            "LOGISTICS_SIM_DECLARATIONS_TOPIC",
+            str(raw.get("declarations_topic", "asset-declarations")),
+        )
+
         return cls(
             tick_interval_s=float(raw.get("tick_interval_s", 30)),
             output_topic=str(raw.get("output_topic", "asset-element-telemetry")),
@@ -574,6 +605,8 @@ class SimConfig:
             site_nation=site_nation,
             parts_availability=_parse_parts_availability(raw, path),
             fielding=_parse_fielding(raw, path, edge_clusters),
+            releasability_edge_defaults=releasability_edge_defaults,
+            declarations_topic=declarations_topic,
         )
 
     def profile_for_variant(self, platform_variant: str) -> AssetProfile | None:
