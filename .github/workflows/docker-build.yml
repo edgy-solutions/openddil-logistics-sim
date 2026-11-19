@@ -3,11 +3,8 @@ name: Docker Build
 on:
   push:
     branches: [ "master" ]
-    # Also fire on annotated tags (v1.0.0, v1.1.0, ...) so a release
-    # cut publishes a versioned image (:v1.0.0) alongside :latest.
-    # values-pinned.yaml + the mirror script can then resolve the tag
-    # to a fixed digest for reproducible deploys.
-    tags: [ "v*" ]
+    # Version tags don't build here. A release adds the version tag to an
+    # image already built (see release.yml) and never moves :latest.
   pull_request:
     branches: [ "master" ]
   # Manual trigger for re-running a build without a code change (e.g.
